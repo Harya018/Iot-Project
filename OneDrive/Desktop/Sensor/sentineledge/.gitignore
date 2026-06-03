@@ -13,3 +13,10 @@ frontend-mobile/.expo/
 *.egg-info/
 .DS_Store
 Thumbs.db
+ssl/
+*.pem
+database/sentineledge.db
+database/sentineledge.db-shm
+database/sentineledge.db-wal
+database/backups/
+clear_alerts.py
