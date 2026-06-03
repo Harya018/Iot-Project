@@ -1,0 +1,95 @@
+"""
+config.py — SentinelEdge configuration loader.
+
+Loads .env.<APP_ENV> (default: .env.development) via python-dotenv.
+RUNTIME_THRESHOLDS is a mutable dict updated at runtime without restart.
+MODULE_STATUS tracks per-module health for the /api/health endpoint.
+
+Alert modules: In-app WebSocket, Email (SMTP), SMS (Android Gateway).
+"""
+
+import os
+from dotenv import load_dotenv
+
+# ── Environment selection ─────────────────────────────────────────────────────
+APP_ENV: str = os.getenv("APP_ENV", "development")
+APP_VERSION: str = "1.0.0"
+
+# Resolve path relative to project root (two levels up from backend/config.py)
+_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(dotenv_path=os.path.join(_root, f".env.{APP_ENV}"))
+
+# ── Threshold defaults ────────────────────────────────────────────────────────
+TEMP_THRESHOLD_HIGH: float = float(os.getenv("TEMP_THRESHOLD_HIGH", "40.0"))
+TEMP_THRESHOLD_LOW: float  = float(os.getenv("TEMP_THRESHOLD_LOW",  "35.0"))
+
+# ── SMTP ──────────────────────────────────────────────────────────────────────
+SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER: str = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+
+# ── Android SMS Gateway ───────────────────────────────────────────────────────
+SMS_GATEWAY_URL: str = os.getenv("SMS_GATEWAY_URL", "http://192.168.1.100:8080")
+SMS_GATEWAY_USER: str = os.getenv("SMS_GATEWAY_USER", "admin")
+SMS_GATEWAY_PASS: str = os.getenv("SMS_GATEWAY_PASS", "password")
+
+# ── Escalation / Cooldown ─────────────────────────────────────────────────────
+ESCALATION_TIMEOUT_SECONDS: int = int(os.getenv("ESCALATION_TIMEOUT_SECONDS", "60"))
+DEMO_ESCALATION_TIMEOUT: int     = int(os.getenv("DEMO_ESCALATION_TIMEOUT", "15"))
+ALERT_COOLDOWN_SECONDS: int      = int(os.getenv("ALERT_COOLDOWN_SECONDS", "120"))
+
+# ── VAPID (Web Push) ──────────────────────────────────────────────────────────
+VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")
+VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "")
+VAPID_CLAIM_EMAIL: str = os.getenv("VAPID_CLAIM_EMAIL", "admin@sentineledge.local")
+
+# ── Server ────────────────────────────────────────────────────────────────────
+SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
+SERVER_PORT: int = int(os.getenv("SERVER_PORT", "5000"))
+
+# ── Demo mode ─────────────────────────────────────────────────────────────────
+DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+
+# ── Admin password ────────────────────────────────────────────────────────────
+ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "sentineledge-admin")
+
+# ── Runtime-mutable thresholds ────────────────────────────────────────────────
+# Updated via POST /api/config/thresholds without restarting the server.
+# Flat format used internally by the threshold engine.
+RUNTIME_THRESHOLDS: dict = {
+    "temp_high": TEMP_THRESHOLD_HIGH,
+    "temp_low":  TEMP_THRESHOLD_LOW,
+    # Nested view for convenience (mirrors flat keys above)
+    "temperature": {
+        "high": TEMP_THRESHOLD_HIGH,
+        "low":  TEMP_THRESHOLD_LOW,
+    },
+}
+
+# Tracks whether RUNTIME_THRESHOLDS have been overridden at runtime
+RUNTIME_SOURCE: str = "default"        # "default" | "runtime_override"
+RUNTIME_LAST_CHANGED: str = ""         # ISO timestamp, set on override
+
+# Default threshold snapshot for reset
+DEFAULT_THRESHOLDS: dict = {
+    "temp_high": TEMP_THRESHOLD_HIGH,
+    "temp_low":  TEMP_THRESHOLD_LOW,
+}
+
+# ── Module health status ───────────────────────────────────────────────────────
+# Three alert modules: in-app WebSocket, email, SMS.
+MODULE_STATUS: dict = {
+    "sensor": "starting",
+    "database": "starting",
+    "email": "not_built",
+    "sms": "not_built",
+    "websocket": "starting",
+}
+
+# ── Live counters (updated by WebSocket manager) ──────────────────────────────
+CONNECTED_CLIENTS: int = 0
+
+# ── Server start time (used for /api/health uptime calculation) ───────────────
+import datetime as _dt
+SERVER_START_TIME: _dt.datetime = _dt.datetime.utcnow()

@@ -1,0 +1,15 @@
+.env.development
+.env.production
+database/sentineledge.db
+logs/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+whatsapp-server/.wwebjs_auth/
+frontend-web/dist/
+frontend-mobile/.expo/
+*.egg-info/
+.DS_Store
+Thumbs.db
