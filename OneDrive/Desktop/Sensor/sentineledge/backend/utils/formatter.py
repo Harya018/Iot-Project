@@ -44,11 +44,27 @@ def format_alert_message(
     """
     Return a single-line alert message for email body and in-app display.
 
-    Example:
-        "[WARNING] Temperature is 42.0°C — exceeds high threshold of 40.0°C"
+    LOW  direction — machine has cooled to threshold:
+        "[WARNING] Machine cooled to 38.5°C — below threshold of 40.0°C.
+         Machine is ready for next process."
+
+    HIGH direction — overheating:
+        "[CRITICAL] Temperature is 92.3°C — exceeds maximum safe threshold
+         of 90.0°C. Immediate attention required."
     """
-    phrase = _breach_phrase(parameter, value, threshold, direction, unit)
-    return f"[{severity}] {phrase}"
+    param_name = parameter.capitalize()
+    if direction == "low":
+        return (
+            f"[{severity}] Machine cooled to {value}{unit} — "
+            f"below threshold of {threshold}{unit}. "
+            f"Machine is ready for next process."
+        )
+    else:
+        return (
+            f"[{severity}] {param_name} is {value}{unit} — "
+            f"exceeds maximum safe threshold of {threshold}{unit}. "
+            f"Immediate attention required."
+        )
 
 
 def format_escalation_message(

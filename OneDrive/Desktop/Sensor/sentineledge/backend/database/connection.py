@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     name             TEXT    NOT NULL,
     phone            TEXT    NOT NULL,
     email            TEXT    NOT NULL,
+    pin              TEXT    DEFAULT NULL,
     escalation_order INTEGER NOT NULL UNIQUE,
     active           INTEGER DEFAULT 1,
     created_at       TEXT    NOT NULL
@@ -254,6 +255,12 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
                 PRAGMA foreign_keys=ON;
             """)
             logger.info("Migration: push_subscription column removed from subscribers table")
+
+        # Migration 7: add pin column if missing (nullable TEXT -- stores SHA-256 hash)
+        if "pin" not in subscriber_cols:
+            conn.execute("ALTER TABLE subscribers ADD COLUMN pin TEXT DEFAULT NULL")
+            conn.commit()
+            logger.info("Migration: added pin column to subscribers table")
 
     except Exception as exc:
         logger.warning("Migration warning: %s", exc)

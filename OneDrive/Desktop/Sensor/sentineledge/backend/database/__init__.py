@@ -19,7 +19,9 @@ from database.queries.alerts import (
 from database.queries.subscribers import (
     get_subscribers_ordered,
     get_subscriber_by_order,
+    get_subscriber_by_name_and_pin,
     add_subscriber,
+    set_subscriber_pin,
     update_push_subscription,
     delete_subscriber,
 )
@@ -42,6 +44,7 @@ __all__ = [
     "set_max_escalated", "get_recent_alerts", "get_alerts_today_count",
     # subscribers
     "get_subscribers_ordered", "get_subscriber_by_order",
+    "get_subscriber_by_name_and_pin", "set_subscriber_pin",
     "add_subscriber", "update_push_subscription", "delete_subscriber",
     # escalation log
     "log_escalation",

@@ -7,18 +7,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        bg: '#0f1117',
-        card: '#1a1d27',
-        primary: '#7c3aed',
-        success: '#10b981',
-        warning: '#f59e0b',
-        danger: '#ef4444',
-        'text-primary': '#f9fafb',
-        'text-secondary': '#9ca3af',
+        sidebar: '#1E1B4B',
+        primary: '#7C3AED',
+        'primary-light': '#EDE9FE',
       },
-      fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-      },
+      animation: {
+        'pulse-slow': 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'ping-slow': 'ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite',
+      }
     },
   },
   plugins: [],

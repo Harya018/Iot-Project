@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import socket
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, APIRouter
@@ -50,6 +51,11 @@ from routers.config import router as config_router
 from routers.simulate import router as simulate_router
 from routers.health import router as health_router
 from routers.admin import router as admin_router
+from routers.auth import router as auth_router
+from routers.history import router as history_router
+from routers.reports import router as reports_router
+from routers.receipts import router as receipts_router
+from routers.events import router as events_router
 
 from database.backup import schedule_daily_backup
 from database.retention import schedule_retention_cleanup
@@ -258,6 +264,43 @@ async def websocket_endpoint(ws: WebSocket):
         remove_connection(ws)
 
 
+# ─── Live log WebSocket ──────────────────────────────────────────────────────
+
+@app.websocket("/ws/logs")
+async def log_stream(websocket: WebSocket):
+    """Stream sentineledge.log in real time to the admin dashboard."""
+    await websocket.accept()
+    log_path = Path("logs/sentineledge.log")
+
+    # Send last 100 lines on connect
+    if log_path.exists():
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in lines[-100:]:
+                await websocket.send_text(line)
+        except Exception as exc:
+            logger.warning("log_stream: error reading initial lines: %s", exc)
+
+    last_size = log_path.stat().st_size if log_path.exists() else 0
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            if log_path.exists():
+                size = log_path.stat().st_size
+                if size > last_size:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(last_size)
+                        new_content = f.read()
+                    last_size = size
+                    for line in new_content.splitlines():
+                        if line.strip():
+                            await websocket.send_text(line)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("log_stream error: %s", exc)
+
+
 # ─── Readings endpoint ────────────────────────────────────────────────────────
 
 _readings_router = APIRouter(prefix="/api", tags=["Readings"])
@@ -291,11 +334,32 @@ app.include_router(config_router)
 app.include_router(simulate_router)
 app.include_router(health_router)
 app.include_router(admin_router)
+app.include_router(auth_router)
+app.include_router(history_router)
+app.include_router(reports_router)
+app.include_router(receipts_router)
+app.include_router(events_router)
 
 # ─── Static files (built React app) ──────────────────────────────────────────
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
+
 if os.path.isdir(_static_dir):
-    app.mount("/", StaticFiles(directory=_static_dir, html=True), name="static")
+    # Serve /assets/* (JS, CSS) as static files
+    _assets_dir = os.path.join(_static_dir, "assets")
+    if os.path.isdir(_assets_dir):
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+
+    # SPA catch-all — MUST be last; returns index.html for every unknown path
+    # so React Router can handle /dashboard, /alerts, /settings on hard refresh.
+    from fastapi.responses import FileResponse as _FR
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        index = os.path.join(_static_dir, "index.html")
+        if os.path.exists(index):
+            return _FR(index)
+        return {"error": "Frontend not built. Run npm run build in frontend-web/"}
+
 else:
     logger.warning(
         "Static dir '%s' not found. Run 'npm run build' in frontend-web/ first.",

@@ -2,43 +2,211 @@
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  * {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-  }
+*, *::before, *::after { box-sizing: border-box; }
 
-  html {
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-
-  body {
-    background-color: #0f1117;
-    color: #f9fafb;
-    min-height: 100vh;
-  }
-
-  ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
-  }
-  ::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.03);
-  }
-  ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 3px;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: #F8F9FC;
+  color: #1F2937;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
 }
 
-@layer utilities {
-  .custom-scroll {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
-  }
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #9CA3AF; }
+
+/* ── Sidebar ── */
+.sidebar {
+  background: #1E1B4B;
+  width: 240px;
+  min-height: 100vh;
+  position: fixed;
+  left: 0; top: 0;
+  display: flex;
+  flex-direction: column;
+  z-index: 50;
+  transition: width 0.25s ease;
 }
+@media (max-width: 768px) {
+  .sidebar { width: 60px; }
+  .sidebar-label { display: none; }
+}
+
+/* ── Card ── */
+.card {
+  background: #FFFFFF;
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  overflow: hidden;
+}
+
+/* ── Animations ── */
+@keyframes slideInRight {
+  from { transform: translateX(120%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes slideOutRight {
+  from { transform: translateX(0);    opacity: 1; }
+  to   { transform: translateX(120%); opacity: 0; }
+}
+@keyframes flashRed {
+  0%, 100% { background-color: #FEF2F2; }
+  50%       { background-color: #FECACA; }
+}
+@keyframes pulseNumber {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+  100% { transform: scale(1); }
+}
+@keyframes shimmer {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+.animate-flash-red { animation: flashRed 1s ease-in-out infinite; }
+.animate-pulse-num { animation: pulseNumber 0.4s ease-in-out; }
+.toast-enter { animation: slideInRight 0.3s ease forwards; }
+.toast-exit  { animation: slideOutRight 0.3s ease forwards; }
+.animate-shimmer { animation: shimmer 1.5s ease-in-out infinite; }
+
+/* ── Temp display ── */
+.temp-value {
+  font-size: 4rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  transition: color 0.5s ease;
+}
+
+/* ── Table ── */
+.data-table th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6B7280;
+  padding: 0.625rem 1rem;
+  border-bottom: 1px solid #E5E7EB;
+  text-align: left;
+}
+.data-table td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #F3F4F6;
+  font-size: 0.875rem;
+  color: #1F2937;
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: #F9FAFB; }
+
+/* ── Inputs ── */
+.form-input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #E5E7EB;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  color: #1F2937;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  background: #FFFFFF;
+}
+.form-input:focus {
+  border-color: #7C3AED;
+  box-shadow: 0 0 0 3px rgba(124,58,237,0.1);
+}
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary   { background: #7C3AED; color: #fff; }
+.btn-primary:hover:not(:disabled)   { background: #6D28D9; }
+.btn-danger    { background: #EF4444; color: #fff; }
+.btn-danger:hover:not(:disabled)    { background: #DC2626; }
+.btn-warning   { background: #F59E0B; color: #fff; }
+.btn-warning:hover:not(:disabled)   { background: #D97706; }
+.btn-info      { background: #3B82F6; color: #fff; }
+.btn-info:hover:not(:disabled)      { background: #2563EB; }
+.btn-ghost {
+  background: transparent;
+  color: #6B7280;
+  border: 1px solid #E5E7EB;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: #F9FAFB;
+  color: #1F2937;
+}
+.btn-sm { padding: 0.25rem 0.625rem; font-size: 0.75rem; }
+.btn-xs { padding: 0.125rem 0.5rem; font-size: 0.7rem; }
+
+/* ── Status dot ── */
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* ── Admin modal overlay ── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  backdrop-filter: blur(4px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-box {
+  background: #fff;
+  border-radius: 1rem;
+  padding: 2rem;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+}
+
+/* ── Alarm banner ── */
+.alarm-banner {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 200;
+  background: #EF4444;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1.5rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  animation: flashRed 1s ease-in-out infinite;
+}
+
+/* ── Terminal (LogsPage) ── */
+.terminal-bg {
+  background: #0F1117;
+  color: #9CA3AF;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+.log-info     { color: #9CA3AF; }
+.log-debug    { color: #60A5FA; }
+.log-warning  { color: #F59E0B; }
+.log-error    { color: #EF4444; }
+.log-critical { color: #EF4444; font-weight: 700; }
+

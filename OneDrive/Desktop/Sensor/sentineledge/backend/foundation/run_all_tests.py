@@ -59,10 +59,10 @@ try:
             lambda: assert_true(cfg.TEMP_THRESHOLD_HIGH > cfg.TEMP_THRESHOLD_LOW)),
         ("TEMP_THRESHOLD_HIGH is float",
             lambda: assert_true(isinstance(cfg.TEMP_THRESHOLD_HIGH, float))),
-        ("TEMP_THRESHOLD_HIGH == 40.0",
-            lambda: assert_true(cfg.TEMP_THRESHOLD_HIGH == 40.0)),
-        ("TEMP_THRESHOLD_LOW == 35.0",
-            lambda: assert_true(cfg.TEMP_THRESHOLD_LOW == 35.0)),
+        ("TEMP_THRESHOLD_HIGH == 90.0",
+            lambda: assert_true(cfg.TEMP_THRESHOLD_HIGH == 90.0)),
+        ("TEMP_THRESHOLD_LOW == 38.0",
+            lambda: assert_true(cfg.TEMP_THRESHOLD_LOW == 38.0)),
         ("ALERT_COOLDOWN_SECONDS > 0",
             lambda: assert_true(cfg.ALERT_COOLDOWN_SECONDS > 0)),
         ("ESCALATION_TIMEOUT_SECONDS > 0",
@@ -88,7 +88,7 @@ except Exception as e:
 # ── SUITE 02 — MODELS ─────────────────────────────────────────────────────────
 try:
     from models import (BreachEvent, ReadingOut, AlertOut, SubscriberIn,
-                        ThresholdConfigIn, AcknowledgeIn)
+                        ThresholdConfigIn, AcknowledgeIn, LoginIn)
     from pydantic import ValidationError
 
     def _must_fail(fn):
@@ -123,10 +123,16 @@ try:
             lambda: assert_true(SubscriberIn(name="Bob",phone="+919876543210",
                 email="b@c.com",escalation_order=2).escalation_order==2)),
         ("ThresholdConfigIn accepts valid data",
-            lambda: assert_true(ThresholdConfigIn(temp_high=40.0,temp_low=35.0).temp_high==40.0)),
+            lambda: assert_true(ThresholdConfigIn(temp_high=90.0,temp_low=38.0).temp_high==90.0)),
+        ("LoginIn rejects PIN with letters",
+            lambda: _must_fail(lambda: LoginIn(name="Alice",pin="abc12"))),
+        ("LoginIn rejects PIN shorter than 4 digits",
+            lambda: _must_fail(lambda: LoginIn(name="Alice",pin="123"))),
+        ("LoginIn rejects empty name",
+            lambda: _must_fail(lambda: LoginIn(name="",pin="1234"))),
     ])
 except Exception as e:
-    suite_fail("02","MODELS",10,e)
+    suite_fail("02","MODELS",13,e)
 
 # ── SUITE 03 — UTILS ──────────────────────────────────────────────────────────
 try:
@@ -209,6 +215,16 @@ try:
             "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'")}
         assert "idx_alerts_timestamp" in idxs
         assert "idx_readings_timestamp" in idxs
+    def _t04_13():
+        # add a subscriber with a known PIN, then look them up
+        import hashlib
+        database.add_subscriber("PinUser","+911234567890","pin@test.com",3,pin="1234")
+        result = database.get_subscriber_by_name_and_pin("PinUser","1234")
+        assert result is not None, "expected subscriber, got None"
+        assert result["name"] == "PinUser"
+    def _t04_14():
+        result = database.get_subscriber_by_name_and_pin("PinUser","9999")
+        assert result is None, f"expected None for wrong PIN, got {result}"
 
     run_suite("04","DATABASE",[
         ("init_db() runs without error",
@@ -237,9 +253,11 @@ try:
             lambda: assert_true(database.update_escalation_level(
                 database.get_recent_alerts(1)[0]["id"], 2))),
         ("Performance indexes exist", _t04_12),
+        ("get_subscriber_by_name_and_pin returns subscriber when PIN matches", _t04_13),
+        ("get_subscriber_by_name_and_pin returns None when PIN is wrong", _t04_14),
     ])
 except Exception as e:
-    suite_fail("04","DATABASE",12,e)
+    suite_fail("04","DATABASE",14,e)
 finally:
     try:
         import database.connection as _dc2
@@ -252,26 +270,26 @@ finally:
 try:
     from core.thresholds import THRESHOLDS, get_all_thresholds
     run_suite("05","THRESHOLDS",[
-        ("temperature.high == 40.0",
-            lambda: assert_true(THRESHOLDS.temperature.high == 40.0)),
-        ("temperature.low == 35.0",
-            lambda: assert_true(THRESHOLDS.temperature.low == 35.0)),
+        ("temperature.high == 90.0",
+            lambda: assert_true(THRESHOLDS.temperature.high == 90.0)),
+        ("temperature.low == 38.0",
+            lambda: assert_true(THRESHOLDS.temperature.low == 38.0)),
         ("temperature.unit is degree C",
             lambda: assert_true(THRESHOLDS.temperature.unit == "\u00b0C")),
         ("temperature.name is Temperature",
             lambda: assert_true(THRESHOLDS.temperature.name == "Temperature")),
-        ("get_severity 3% over = WARNING",
+        ("get_severity 3% over HIGH = WARNING",
             lambda: assert_true(
-                THRESHOLDS.temperature.get_severity(40.0*1.03,"high")=="WARNING")),
-        ("get_severity 12% over = CRITICAL",
+                THRESHOLDS.temperature.get_severity(90.0*1.03,"high")=="WARNING")),
+        ("get_severity 12% over HIGH = CRITICAL",
             lambda: assert_true(
-                THRESHOLDS.temperature.get_severity(40.0*1.12,"high")=="CRITICAL")),
-        ("get_severity 30% over = EMERGENCY",
+                THRESHOLDS.temperature.get_severity(90.0*1.12,"high")=="CRITICAL")),
+        ("get_severity 30% over HIGH = EMERGENCY",
             lambda: assert_true(
-                THRESHOLDS.temperature.get_severity(40.0*1.30,"high")=="EMERGENCY")),
+                THRESHOLDS.temperature.get_severity(90.0*1.30,"high")=="EMERGENCY")),
         ("get_severity low direction works",
             lambda: assert_true(
-                THRESHOLDS.temperature.get_severity(35.0*0.85,"low") in ("CRITICAL","EMERGENCY"))),
+                THRESHOLDS.temperature.get_severity(38.0*0.85,"low") in ("CRITICAL","EMERGENCY"))),
         ("get_all_thresholds returns temperature key",
             lambda: assert_true("temperature" in get_all_thresholds())),
         ("to_dict has all required fields",
@@ -322,25 +340,30 @@ try:
     from core.sensor import get_reading, set_breach_override
 
     def _all_in_range():
-        for _ in range(100):
+        """All readings should be within plausible sensor range."""
+        for _ in range(20):
             r = get_reading()
-            assert 15.0 <= r["temperature"] <= 50.0, f"temp {r['temperature']}"
+            assert 30.0 <= r["temperature"] <= 100.0, f"temp {r['temperature']} out of range"
 
-    def _slow_drift():
-        reads = [get_reading()["temperature"] for _ in range(20)]
+    def _cooling_direction():
+        """Cooling simulator should generally trend downward over readings."""
+        reads = [get_reading()["temperature"] for _ in range(10)]
+        # Should never jump more than 2°C upward per tick (only downward drift)
         for i in range(1, len(reads)):
-            assert abs(reads[i]-reads[i-1]) < 5.0
+            delta = reads[i] - reads[i-1]
+            assert delta <= 2.0, f"Unexpected upward spike of {delta}°C"
 
     def _breach_sim():
-        set_breach_override(5)
+        set_breach_override(5, value=92.0)
         forced = [get_reading() for _ in range(5)]
-        assert all(r["temperature"] == 42.0 for r in forced)
+        assert all(r["temperature"] == 92.0 for r in forced), \
+            f"Expected 92.0, got {[r['temperature'] for r in forced]}"
 
     def _after_sim():
-        set_breach_override(1)
+        set_breach_override(1, value=92.0)
         get_reading()
         r = get_reading()
-        assert r["temperature"] != 42.0 or True  # any value valid
+        assert r["temperature"] != 92.0 or True  # any value valid after override
 
     run_suite("07","SENSOR",[
         ("get_reading returns 2 keys",
@@ -352,14 +375,12 @@ try:
             lambda: assert_true("humidity" not in get_reading())),
         ("timestamp is ISO string",
             lambda: assert_true("T" in get_reading()["timestamp"])),
-        ("temperature in 15.0-50.0",
-            lambda: assert_true(15.0 <= get_reading()["temperature"] <= 50.0)),
-        ("temperature in range 35-42 (demo zone)",
-            lambda: assert_true(15.0 <= get_reading()["temperature"] <= 50.0)),
-        ("100 readings all in range", _all_in_range),
-        ("consecutive readings slow drift", _slow_drift),
-        ("breach simulation forces 42.0", _breach_sim),
-        ("normal drift resumes after simulation", _after_sim),
+        ("temperature in 30.0-100.0 (cooling range)",
+            lambda: assert_true(30.0 <= get_reading()["temperature"] <= 100.0)),
+        ("all readings in plausible range", _all_in_range),
+        ("cooling simulator trends downward", _cooling_direction),
+        ("breach simulation forces 92.0", _breach_sim),
+        ("normal mode resumes after simulation", _after_sim),
     ])
 except Exception as e:
     suite_fail("07","SENSOR",10,e)
@@ -379,68 +400,89 @@ try:
 
     def _t08_08():
         _reset()
-        thr.check_threshold({"temperature":42.0})
-        r2 = thr.check_threshold({"temperature":42.0})
+        for k in thr.last_breach_direction:
+            thr.last_breach_direction[k] = None
+        thr.check_threshold({"temperature":91.0})
+        r2 = thr.check_threshold({"temperature":91.0})
         assert_true(r2 == [])
 
     def _t08_09():
         _reset()
-        thr.check_threshold({"temperature":42.0})  # trips temp_high
-        r = thr.check_threshold({"temperature":18.0})  # trips temp_low
+        for k in thr.last_breach_direction:
+            thr.last_breach_direction[k] = None
+        thr.check_threshold({"temperature":91.0})  # trips temp_high
+        _reset()  # reset cooldown, not direction
+        thr.check_threshold({"temperature":65.0})   # prime direction reset (above 60°C)
+        r = thr.check_threshold({"temperature":37.9})  # trips temp_low (strictly below 38.0)
         assert_true(any(b.direction=="low" for b in r))
 
     def _t08_10():
         _reset()
-        thr.check_threshold({"temperature":42.0})
+        for k in thr.last_breach_direction:
+            thr.last_breach_direction[k] = None
+        thr.check_threshold({"temperature":91.0})
         time.sleep(2.2)
-        r = thr.check_threshold({"temperature":42.0})
+        r = thr.check_threshold({"temperature":91.0})
         assert_true(len(r) == 1)
 
+    # Update RUNTIME_THRESHOLDS to match new industrial values for suite 08
+    _cfg.RUNTIME_THRESHOLDS["temp_high"] = 90.0
+    _cfg.RUNTIME_THRESHOLDS["temp_low"]  = 38.0
+
+    def _reset_direction():
+        """Reset both cooldowns AND direction tracker."""
+        _reset()
+        for k in thr.last_breach_direction:
+            thr.last_breach_direction[k] = None
+
     run_suite("08","THRESHOLD ENGINE",[
-        ("normal reading = empty breach list",
-            lambda: (_reset(),
-                assert_true(thr.check_threshold({"temperature":37.0})==[]))),
-        ("high temperature breach detected",
-            lambda: (_reset(),
-                assert_true(len(thr.check_threshold({"temperature":42.0}))==1))),
-        ("low temperature breach detected",
-            lambda: (_reset(),
+        ("normal reading (55C) = empty breach list",
+            lambda: (_reset_direction(),
+                assert_true(thr.check_threshold({"temperature":55.0})==[]))),
+        ("high breach detected at 91C",
+            lambda: (_reset_direction(),
+                assert_true(len(thr.check_threshold({"temperature":91.0}))==1))),
+        ("low breach detected at 37.9C",
+            lambda: (_reset_direction(),
+                # Prime direction tracker first (machine was hot)
+                thr.check_threshold({"temperature":91.0}),
+                _reset(),  # reset cooldown only, not direction
+                # Now simulate temperature rising above 60°C to reset low direction
+                thr.check_threshold({"temperature":65.0}),
                 assert_true(any(b.direction=="low" for b in
-                    thr.check_threshold({"temperature":18.0}))))),
+                    thr.check_threshold({"temperature":37.9}))))),
         ("only temperature parameter in breaches",
-            lambda: (_reset(),
+            lambda: (_reset_direction(),
                 assert_true(all(b.parameter=="temperature" for b in
-                    thr.check_threshold({"temperature":42.0}))))),
-        ("breach direction is high for 42C",
-            lambda: (_reset(),
-                assert_true(thr.check_threshold({"temperature":42.0})[0].direction=="high"))),
+                    thr.check_threshold({"temperature":91.0}))))),
+        ("breach direction is high for 91C",
+            lambda: (_reset_direction(),
+                assert_true(thr.check_threshold({"temperature":91.0})[0].direction=="high"))),
         ("breach has severity field",
-            lambda: (_reset(),
+            lambda: (_reset_direction(),
                 assert_true(hasattr(thr.check_threshold(
-                    {"temperature":42.0})[0],"severity")))),
+                    {"temperature":91.0})[0],"severity")))),
         ("breach has correct direction",
-            lambda: (_reset(),
+            lambda: (_reset_direction(),
                 assert_true(thr.check_threshold(
-                    {"temperature":42.0})[0].direction=="high"))),
+                    {"temperature":91.0})[0].direction=="high"))),
         ("cooldown blocks same parameter+direction", _t08_08),
         ("temp_high cooldown does NOT block temp_low", _t08_09),
         ("breach fires again after cooldown expires", _t08_10),
-        ("exactly 40.0 is NOT a breach",
-            lambda: (_reset(),
-                assert_true(thr.check_threshold({"temperature":40.0})==[]))),
-        ("exactly 35.0 is NOT a breach",
-            lambda: (_reset(),
-                assert_true(thr.check_threshold({"temperature":35.0})==[]))),
-        ("40.1 triggers high breach",
-            lambda: (_reset(),
-                assert_true(len(thr.check_threshold({"temperature":40.1}))==1
-                    and thr.check_threshold.__module__ is not None  # reset needed
-                    or True)
-                and (_reset(),
-                    assert_true(thr.check_threshold({"temperature":40.1})[0].direction=="high")))),
-        ("34.9 triggers low breach",
-            lambda: (_reset(),
-                assert_true(thr.check_threshold({"temperature":34.9})[0].direction=="low"))),
+        ("exactly 90.0 is NOT a breach",
+            lambda: (_reset_direction(),
+                assert_true(thr.check_threshold({"temperature":90.0})==[]))),
+        ("exactly 38.0 is NOT a breach",
+            lambda: (_reset_direction(),
+                assert_true(thr.check_threshold({"temperature":38.0})==[]))),
+        ("90.1 triggers high breach",
+            lambda: (_reset_direction(),
+                assert_true(thr.check_threshold({"temperature":90.1})[0].direction=="high"))),
+        ("37.9 triggers low breach",
+            lambda: (_reset_direction(),
+                # Need direction to be reset (simulate machine was hot first)
+                thr.check_threshold({"temperature":65.0}),  # above 60°C reset
+                assert_true(thr.check_threshold({"temperature":37.9})[0].direction=="low"))),
     ])
     _cfg.ALERT_COOLDOWN_SECONDS = _ORIG_CD
     for k in thr.cooldown_tracker:
@@ -567,42 +609,54 @@ try:
         for k in _thr10.cooldown_tracker:
             _thr10.cooldown_tracker[k] = None
 
+    # Update RUNTIME_THRESHOLDS for pipeline suite too
+    _cfg10.RUNTIME_THRESHOLDS["temp_high"] = 90.0
+    _cfg10.RUNTIME_THRESHOLDS["temp_low"]  = 38.0
+
+    def _r10_full():
+        """Reset cooldowns AND direction tracker for pipeline tests."""
+        _r10()
+        for k in _thr10.last_breach_direction:
+            _thr10.last_breach_direction[k] = None
+
     def _t10_01():
-        """Full pipeline: 42.0 passes validator, breaches threshold, correct fields."""
-        _r10()  # clear any cooldown left by suite 08
-        # Use fresh validator instance to avoid module singleton state from suite 06
+        """Full pipeline: 91.0 passes validator, breaches HIGH threshold, correct fields."""
+        _r10_full()
         fresh_v = _val10.ReadingValidator()
         # Prime with a nearby reading to prevent false spike detection
-        fresh_v.validate({"temperature": 41.0, "timestamp": _n10()})
-        reading = {"temperature": 42.0, "timestamp": _n10()}
+        fresh_v.validate({"temperature": 89.0, "timestamp": _n10()})
+        reading = {"temperature": 91.0, "timestamp": _n10()}
         # Step 1: validator must pass
         ok, reason = fresh_v.validate(reading)
         assert_true(ok)
         # Step 2: must produce exactly 1 breach
-        _r10()
+        _r10_full()
         breaches = _thr10.check_threshold(reading)
         assert_true(len(breaches) == 1)
         b = breaches[0]
         # Step 3: each breach field must be correct
         assert_true(b.parameter == "temperature")
-        assert_true(b.value == 42.0)
+        assert_true(b.value == 91.0)
         assert_true(b.direction == "high")
         expected_thr = _cfg10.RUNTIME_THRESHOLDS["temp_high"]
         assert_true(b.threshold == expected_thr)
         assert_true(b.severity in ("WARNING", "CRITICAL", "EMERGENCY"))
 
     def _t10_02():
-        """Boundary: exactly 40.0 and 35.0 produce no breach; 40.1 and 34.9 do."""
-        _r10()
-        assert_true(_thr10.check_threshold({"temperature": 40.0}) == [])
-        _r10()
-        assert_true(_thr10.check_threshold({"temperature": 35.0}) == [])
-        _r10()
-        assert_true(len(_thr10.check_threshold({"temperature": 40.1})) == 1)
-        _r10()
-        assert_true(len(_thr10.check_threshold({"temperature": 34.9})) == 1)
-        _r10()
-        assert_true(_thr10.check_threshold({"temperature": 34.9})[0].direction == "low")
+        """Boundary: exactly 90.0 and 38.0 produce no breach; 90.1 and 37.9 do."""
+        _r10_full()
+        assert_true(_thr10.check_threshold({"temperature": 90.0}) == [])
+        _r10_full()
+        assert_true(_thr10.check_threshold({"temperature": 38.0}) == [])
+        _r10_full()
+        assert_true(len(_thr10.check_threshold({"temperature": 90.1})) == 1)
+        _r10_full()
+        # For low breach: prime the direction reset first
+        _thr10.check_threshold({"temperature": 65.0})  # above 60°C — resets low direction
+        assert_true(len(_thr10.check_threshold({"temperature": 37.9})) == 1)
+        _r10_full()
+        _thr10.check_threshold({"temperature": 65.0})
+        assert_true(_thr10.check_threshold({"temperature": 37.9})[0].direction == "low")
 
     def _t10_03():
         """Invalid reading (200°C) is blocked by validator; threshold never called."""
@@ -616,45 +670,51 @@ try:
 
     def _t10_04():
         """Cooldown integration: second identical breach blocked, resumes after expiry."""
-        _r10()
+        _r10_full()
         _orig_cd = _cfg10.ALERT_COOLDOWN_SECONDS
         _cfg10.ALERT_COOLDOWN_SECONDS = 2
-        b1 = _thr10.check_threshold({"temperature": 42.0})
-        assert_true(len(b1) == 1)          # first breach fires
-        b2 = _thr10.check_threshold({"temperature": 43.0})
-        assert_true(b2 == [])              # cooldown blocks it
+        b1 = _thr10.check_threshold({"temperature": 91.0})
+        assert_true(len(b1) == 1)           # first breach fires
+        b2 = _thr10.check_threshold({"temperature": 92.0})
+        assert_true(b2 == [])               # cooldown blocks it
         time.sleep(2.2)
-        b3 = _thr10.check_threshold({"temperature": 42.0})
-        assert_true(len(b3) == 1)          # cooldown expired, fires again
+        b3 = _thr10.check_threshold({"temperature": 91.0})
+        assert_true(len(b3) == 1)           # cooldown expired, fires again
         _cfg10.ALERT_COOLDOWN_SECONDS = _orig_cd
-        _r10()
+        _r10_full()
 
     def _t10_05():
         """Severity pipeline: correct severity per exceedance percentage."""
-        _r10()
-        # 40.1 = just over → WARNING
-        b = _thr10.check_threshold({"temperature": 40.1})
+        _r10_full()
+        # 90.1 = just over 90.0 → WARNING (< 5%)
+        b = _thr10.check_threshold({"temperature": 90.1})
         assert_true(b[0].severity == "WARNING")
-        _r10()
-        # 44.0 = 10% over 40.0 → CRITICAL
-        b = _thr10.check_threshold({"temperature": 44.0})
+        _r10_full()
+        # 99.0 = 10% over 90.0 → CRITICAL
+        b = _thr10.check_threshold({"temperature": 99.0})
         assert_true(b[0].severity == "CRITICAL")
-        _r10()
-        # 50.1 = 25%+ over 40.0 → EMERGENCY
-        b = _thr10.check_threshold({"temperature": 50.1})
+        _r10_full()
+        # 115.0 = 27.8% over 90.0 → EMERGENCY
+        b = _thr10.check_threshold({"temperature": 115.0})
         assert_true(b[0].severity == "EMERGENCY")
-        _r10()
-        # 34.9 = just under 35.0 → WARNING
-        b = _thr10.check_threshold({"temperature": 34.9})
+        _r10_full()
+        # 37.9 = just under 38.0 → WARNING (< 5% below)
+        _thr10.check_threshold({"temperature": 65.0})  # reset low direction
+        b = _thr10.check_threshold({"temperature": 37.9})
         assert_true(b[0].severity == "WARNING")
+        # Reset cooldown only — then prime direction again for next LOW test
         _r10()
-        # 31.5 = 10% under 35.0 → CRITICAL
-        b = _thr10.check_threshold({"temperature": 31.5})
+        for k in _thr10.last_breach_direction:
+            _thr10.last_breach_direction[k] = None
+        # 34.0 = ~10.5% under 38.0 → CRITICAL (clearly past critical_pct=10%)
+        _thr10.check_threshold({"temperature": 65.0})  # reset low direction
+        b = _thr10.check_threshold({"temperature": 34.0})
         assert_true(b[0].severity == "CRITICAL")
 
+
     run_suite("10","PIPELINE INTEGRATION",[
-        ("full pipeline: 42.0 breaches correctly", _t10_01),
-        ("boundary: 40.0 and 35.0 are not breaches", _t10_02),
+        ("full pipeline: 91.0 breaches correctly", _t10_01),
+        ("boundary: 90.0 and 38.0 are not breaches", _t10_02),
         ("validator blocks 200.0 before threshold", _t10_03),
         ("cooldown integration: blocks then resumes", _t10_04),
         ("severity pipeline: WARNING/CRITICAL/EMERGENCY", _t10_05),

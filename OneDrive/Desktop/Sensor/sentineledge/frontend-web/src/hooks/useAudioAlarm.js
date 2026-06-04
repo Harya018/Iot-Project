@@ -1,107 +1,79 @@
 /**
- * useAudioAlarm.js — Web Audio API alarm hook for SentinelEdge.
+ * src/hooks/useAudioAlarm.js
  *
- * Generates alarm tones procedurally — no external audio files required.
- * Respects browser autoplay policy by initialising AudioContext only after
- * the first user interaction on the page.
+ * Web Audio API alarm system — no external files.
+ * WARNING   → single beep 440 Hz, 0.4s
+ * CRITICAL  → double beep 440 → 880 Hz, 0.3s each
+ * EMERGENCY → repeating 880 Hz beep until stopped
  *
- * Level 1: single 440 Hz beep, 0.5 s
- * Level 2: two beeps, 440 Hz → 880 Hz, 0.3 s each
- * Level 3: continuous repeating 880 Hz alarm until stopAlarm() is called
+ * Browser autoplay policy: audio only starts after first
+ * user interaction. AudioContext is created lazily.
  */
+import { useState, useRef, useCallback } from 'react'
 
-import { useRef, useCallback, useEffect } from 'react';
+export default function useAudioAlarm() {
+  const [isPlaying,       setIsPlaying]       = useState(false)
+  const [currentSeverity, setCurrentSeverity] = useState(null)
 
-export function useAudioAlarm() {
-  const audioCtxRef = useRef(null);
-  const oscillatorRef = useRef(null); // only used for level-3 continuous alarm
-  const hasInteractedRef = useRef(false);
-  const level3IntervalRef = useRef(null);
+  const ctxRef      = useRef(null)
+  const intervalRef = useRef(null)
+  const gainRef     = useRef(null)
 
-  // Unlock AudioContext after the first user gesture
-  useEffect(() => {
-    const unlock = () => {
-      hasInteractedRef.current = true;
-      // Lazily create context on first interaction
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      if (audioCtxRef.current.state === 'suspended') {
-        audioCtxRef.current.resume();
-      }
-    };
-    window.addEventListener('click', unlock, { once: true });
-    window.addEventListener('keydown', unlock, { once: true });
-    return () => {
-      window.removeEventListener('click', unlock);
-      window.removeEventListener('keydown', unlock);
-    };
-  }, []);
-
-  const _getCtx = () => {
-    if (!audioCtxRef.current) {
-      audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+  function getCtx() {
+    if (!ctxRef.current) {
+      ctxRef.current = new (window.AudioContext || window.webkitAudioContext)()
     }
-    return audioCtxRef.current;
-  };
+    return ctxRef.current
+  }
 
-  /** Play a single beep at the given frequency for durationMs milliseconds. */
-  const _beep = useCallback((frequency, durationMs, startTime) => {
-    try {
-      const ctx = _getCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(frequency, startTime);
-      gain.gain.setValueAtTime(0.4, startTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, startTime + durationMs / 1000);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(startTime);
-      osc.stop(startTime + durationMs / 1000 + 0.05);
-    } catch (err) {
-      console.warn('[useAudioAlarm] _beep error:', err);
-    }
-  }, []);
+  function beep(freq, duration, startAt, ctx) {
+    const osc  = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.frequency.value = freq
+    osc.type = 'sine'
+    gain.gain.setValueAtTime(0.3, startAt)
+    gain.gain.exponentialRampToValueAtTime(0.001, startAt + duration)
+    osc.start(startAt)
+    osc.stop(startAt + duration)
+  }
 
   const stopAlarm = useCallback(() => {
-    clearInterval(level3IntervalRef.current);
-    level3IntervalRef.current = null;
+    clearInterval(intervalRef.current)
+    intervalRef.current = null
+    setIsPlaying(false)
+    setCurrentSeverity(null)
+  }, [])
+
+  const playAlarm = useCallback((severity) => {
     try {
-      if (oscillatorRef.current) {
-        oscillatorRef.current.stop();
-        oscillatorRef.current.disconnect();
-        oscillatorRef.current = null;
+      const ctx = getCtx()
+      if (ctx.state === 'suspended') ctx.resume()
+
+      stopAlarm()
+      setIsPlaying(true)
+      setCurrentSeverity(severity)
+
+      const s = severity?.toUpperCase()
+
+      if (s === 'WARNING') {
+        beep(440, 0.4, ctx.currentTime, ctx)
+      } else if (s === 'CRITICAL') {
+        beep(440, 0.3, ctx.currentTime,       ctx)
+        beep(880, 0.3, ctx.currentTime + 0.4, ctx)
+      } else if (s === 'EMERGENCY') {
+        const doBeep = () => {
+          const c = getCtx()
+          beep(880, 0.25, c.currentTime, c)
+        }
+        doBeep()
+        intervalRef.current = setInterval(doBeep, 600)
       }
     } catch (_) {
-      // Already stopped
+      // AudioContext blocked by browser — silent fail
     }
-  }, []);
+  }, [stopAlarm])
 
-  const playAlarm = useCallback((level) => {
-    if (!hasInteractedRef.current) return; // Respect autoplay policy
-
-    stopAlarm(); // Always clean up any previous alarm first
-
-    const ctx = _getCtx();
-    const now = ctx.currentTime;
-
-    if (level === 1) {
-      _beep(440, 500, now);
-    } else if (level === 2) {
-      _beep(440, 300, now);
-      _beep(880, 300, now + 0.4);
-    } else if (level === 3) {
-      // Play immediately, then repeat every 1.2 s
-      const playOneCycle = () => {
-        const t = _getCtx().currentTime;
-        _beep(880, 300, t);
-        _beep(880, 300, t + 0.4);
-      };
-      playOneCycle();
-      level3IntervalRef.current = setInterval(playOneCycle, 1200);
-    }
-  }, [_beep, stopAlarm]);
-
-  return { playAlarm, stopAlarm };
+  return { playAlarm, stopAlarm, isPlaying, currentSeverity }
 }

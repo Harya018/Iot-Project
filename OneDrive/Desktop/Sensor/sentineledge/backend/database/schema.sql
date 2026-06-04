@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS subscribers (
     name             TEXT    NOT NULL,
     phone            TEXT    NOT NULL,
     email            TEXT    NOT NULL,
+    pin              TEXT    DEFAULT NULL,
     escalation_order INTEGER NOT NULL UNIQUE,
     active           INTEGER DEFAULT 1,
     created_at       TEXT    NOT NULL

@@ -13,8 +13,10 @@ Endpoints:
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 import database
+from config import ADMIN_PASSWORD
 from middleware.auth import require_admin
 from models import ConfigChangeOut
 from database.backup import create_backup, get_backup_list
@@ -25,6 +27,22 @@ from utils.time import now_iso
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Admin"])
+
+
+class _VerifyIn(BaseModel):
+    password: str
+
+
+@router.post(
+    "/admin/verify-password",
+    summary="Verify admin password",
+    description="Checks whether the supplied password matches ADMIN_PASSWORD. "
+                "No auth header required. Returns {valid: bool}.",
+)
+async def verify_password(body: _VerifyIn):
+    """Used by the frontend admin modal to verify the password on first entry."""
+    return {"valid": body.password == ADMIN_PASSWORD}
+
 
 
 @router.get(
@@ -121,3 +139,49 @@ async def database_stats():
             status_code=500,
             content={"error": "Failed to get stats", "detail": str(exc)},
         )
+
+
+class _ImportCsvIn(BaseModel):
+    filename: str  # absolute or relative path to the CSV file
+
+
+@router.post(
+    "/admin/import-csv",
+    summary="Import historical readings from CSV",
+    description=(
+        "Reads a CSV file with columns: timestamp, temperature, reference_value. "
+        "Inserts each valid row into the readings table. "
+        "Skips rows with bad data gracefully. "
+        "Requires admin auth. "
+        "Body: {filename: 'path/to/file.csv'}"
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def import_csv(body: _ImportCsvIn):
+    """Import historical readings from a CSV file on the server."""
+    try:
+        from utils.import_csv import import_csv_file
+        count = import_csv_file(body.filename)
+        logger.info("CSV import: %d readings from %s", count, body.filename)
+        return {
+            "status":   "success",
+            "imported": count,
+            "filename": body.filename,
+        }
+    except FileNotFoundError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "File not found", "detail": str(exc)},
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "Invalid CSV format", "detail": str(exc)},
+        )
+    except Exception as exc:
+        logger.error("import_csv failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Import failed", "detail": str(exc)},
+        )
+

@@ -1,83 +1,101 @@
 /**
- * useWebSocket.js — Custom React hook for the SentinelEdge WebSocket stream.
+ * src/hooks/useWebSocket.js
  *
- * Connects to ws://{host}/ws, auto-reconnects every 3 s on disconnect,
- * and exposes the latest reading, active breaches, and connection state.
+ * Connects to the /ws endpoint on the CURRENT page host.
+ * Uses wss: when page is https:, ws: when page is http:.
+ * This means it works on any port or IP — no hardcoded localhost.
+ *
+ * Auto-reconnects with linear backoff (1s → 2s → 3s → max 5s).
+ * Keeps last 60 readings in state.
+ * Calls onBreach(breach) for each breach in an incoming message.
  */
+import { useState, useEffect, useRef, useCallback } from 'react'
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+/** Derive the correct WebSocket URL from the current page location. */
+function getWsUrl() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host     = window.location.host   // includes port if non-standard
+  return `${protocol}//${host}/ws`
+}
 
-const RECONNECT_DELAY_MS = 3000;
+const MAX_READINGS = 60
+const MAX_BACKOFF  = 5000
 
-export function useWebSocket() {
-  const [lastReading, setLastReading] = useState(null);
-  const [breaches, setBreaches] = useState([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState('CONNECTING'); // CONNECTING | LIVE | RECONNECTING
+export default function useWebSocket({ onBreach } = {}) {
+  const [lastReading,      setLastReading]      = useState(null)
+  const [readings,         setReadings]         = useState([])
+  const [isConnected,      setIsConnected]      = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState('CONNECTING')
 
-  const wsRef = useRef(null);
-  const reconnectTimerRef = useRef(null);
-  const unmountedRef = useRef(false);
+  const wsRef      = useRef(null)
+  const retryDelay = useRef(1000)
+  const retryTimer = useRef(null)
+  const mountedRef = useRef(true)
+  const onBreachRef = useRef(onBreach)
+  useEffect(() => { onBreachRef.current = onBreach }, [onBreach])
 
   const connect = useCallback(() => {
-    if (unmountedRef.current) return;
+    if (!mountedRef.current) return
+    setConnectionStatus('CONNECTING')
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws`;
+    try {
+      const ws = new WebSocket(getWsUrl())
+      wsRef.current = ws
 
-    setConnectionStatus('CONNECTING');
-
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (unmountedRef.current) return;
-      setIsConnected(true);
-      setConnectionStatus('LIVE');
-      // Clear any pending reconnect timer
-      clearTimeout(reconnectTimerRef.current);
-    };
-
-    ws.onmessage = (event) => {
-      if (unmountedRef.current) return;
-      try {
-        const data = JSON.parse(event.data);
-        setLastReading({
-          temperature: data.temperature,
-          humidity: data.humidity,
-          timestamp: data.timestamp,
-        });
-        setBreaches(data.breaches || []);
-      } catch (err) {
-        console.error('[useWebSocket] Failed to parse message:', err);
+      ws.onopen = () => {
+        if (!mountedRef.current) return
+        setIsConnected(true)
+        setConnectionStatus('LIVE')
+        retryDelay.current = 1000
       }
-    };
 
-    ws.onclose = () => {
-      if (unmountedRef.current) return;
-      setIsConnected(false);
-      setConnectionStatus('RECONNECTING');
-      reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
-    };
+      ws.onmessage = (e) => {
+        if (!mountedRef.current) return
+        try {
+          const msg = JSON.parse(e.data)
+          if (msg.type === 'server_shutdown') return
 
-    ws.onerror = (err) => {
-      console.error('[useWebSocket] Error:', err);
-      ws.close(); // triggers onclose → reconnect
-    };
-  }, []);
+          setLastReading(msg)
+          setReadings(prev => {
+            const next = [...prev, msg]
+            return next.length > MAX_READINGS ? next.slice(-MAX_READINGS) : next
+          })
+
+          if (msg.breaches && msg.breaches.length > 0 && onBreachRef.current) {
+            msg.breaches.forEach(b => onBreachRef.current(b))
+          }
+        } catch (_) { /* ignore parse errors */ }
+      }
+
+      ws.onclose = () => {
+        if (!mountedRef.current) return
+        setIsConnected(false)
+        setConnectionStatus('RECONNECTING')
+        wsRef.current = null
+
+        retryTimer.current = setTimeout(() => {
+          retryDelay.current = Math.min(retryDelay.current + 1000, MAX_BACKOFF)
+          connect()
+        }, retryDelay.current)
+      }
+
+      ws.onerror = () => { ws.close() }
+
+    } catch (_) {
+      setConnectionStatus('RECONNECTING')
+      retryTimer.current = setTimeout(connect, retryDelay.current)
+    }
+  }, [])
 
   useEffect(() => {
-    unmountedRef.current = false;
-    connect();
+    mountedRef.current = true
+    connect()
     return () => {
-      unmountedRef.current = true;
-      clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect on intentional unmount
-        wsRef.current.close();
-      }
-    };
-  }, [connect]);
+      mountedRef.current = false
+      clearTimeout(retryTimer.current)
+      if (wsRef.current) wsRef.current.close()
+    }
+  }, [connect])
 
-  return { lastReading, breaches, isConnected, connectionStatus };
+  return { lastReading, readings, isConnected, connectionStatus }
 }

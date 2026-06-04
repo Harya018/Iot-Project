@@ -1,9 +1,15 @@
 """
 core/thresholds.py — Single source of truth for threshold configuration.
 
-═══════════════════════════════════════════════════════════
-WHEN THE CLIENT SENDS A REAL DATASET:
-  Edit ONLY the numbers inside THRESHOLDS below.
+═════════════════════════════════════════════════════════
+INDUSTRIAL COOLING PROCESS (real client data):
+  Machine cools from ~88-90°C to ~36-38°C over approximately 2.5 hours.
+  Alert fires when machine has cooled down to LOW threshold.
+
+  HIGH = 90.0°C  — overheating danger
+  LOW  = 38.0°C  — machine cooled and ready for next process
+
+  EDIT ONLY THE NUMBERS INSIDE THRESHOLDS BELOW.
   Do not change any other file.
   Restart the server after saving. Done.
 ═══════════════════════════════════════════════════════════
@@ -80,21 +86,24 @@ class ThresholdConfig:
 
     temperature: ParameterThreshold = field(
         default_factory=lambda: ParameterThreshold(
-            high=40.0,
-            low=35.0,
+            high=90.0,
+            low=38.0,
             unit="\u00b0C",
             name="Temperature",
         )
     )
 
 
-# ═══════════════════════════════════════════════════════════
-# EDIT ONLY THESE NUMBERS WHEN CLIENT SENDS REAL DATASET:
-# ═══════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
+# INDUSTRIAL COOLING THRESHOLDS (real client data):
+#   HIGH = 90.0°C  — overheating danger threshold
+#   LOW  = 38.0°C  — machine cooled, ready for next process
+# EDIT ONLY THESE NUMBERS WHEN CLIENT SENDS REVISED DATA:
+# ═════════════════════════════════════════════════════════
 THRESHOLDS = ThresholdConfig(
     temperature=ParameterThreshold(
-        high=40.0,
-        low=35.0,
+        high=90.0,
+        low=38.0,
         unit="\u00b0C",
         name="Temperature",
     )

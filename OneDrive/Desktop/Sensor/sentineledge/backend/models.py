@@ -58,6 +58,7 @@ class SubscriberIn(BaseModel):
     phone: str
     email: EmailStr
     escalation_order: int = Field(ge=1, le=3)
+    pin: Optional[str] = None  # if provided: 4-6 digits, stored as SHA-256 hash
 
     @field_validator("name")
     @classmethod
@@ -86,6 +87,16 @@ class SubscriberIn(BaseModel):
             raise ValueError("escalation_order must be 1, 2, or 3")
         return v
 
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not re.match(r"^[0-9]{4,6}$", v):
+            raise ValueError("pin must be 4-6 digits (numbers only)")
+        return v
+
 
 class SubscriberOut(BaseModel):
     id: int
@@ -94,7 +105,7 @@ class SubscriberOut(BaseModel):
     email: str
     escalation_order: int
     active: bool
-    has_push_subscription: bool
+    has_pin: bool
     created_at: str
 
 
@@ -178,3 +189,50 @@ class ConfigChangeOut(BaseModel):
     old_value: str
     new_value: str
     changed_at: str
+
+
+# ── Auth models ───────────────────────────────────────────────────────────────
+
+class LoginIn(BaseModel):
+    """Mobile app login request: name + numeric PIN."""
+    name: str
+    pin: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 2:
+            raise ValueError("name must be at least 2 characters")
+        return v
+
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^[0-9]{4,6}$", v):
+            raise ValueError("pin must be 4-6 digits (numbers only)")
+        return v
+
+
+class LoginOut(BaseModel):
+    """Successful login response."""
+    token: str
+    subscriber_id: int
+    name: str
+    escalation_order: int
+    message: str = "Login successful"
+
+
+class SetPinIn(BaseModel):
+    """Admin request to set or update a subscriber's PIN."""
+    subscriber_id: int
+    pin: str
+
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^[0-9]{4,6}$", v):
+            raise ValueError("pin must be 4-6 digits (numbers only)")
+        return v

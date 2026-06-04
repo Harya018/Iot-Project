@@ -11,9 +11,23 @@ from fastapi.responses import JSONResponse
 import database
 from middleware.auth import require_admin
 from middleware.rate_limiter import rate_limiter, make_rate_limit_response
-from models import PushSubscriptionIn, SubscriberIn, SubscriberOut
+from models import PushSubscriptionIn, SetPinIn, SubscriberIn, SubscriberOut
 
 router = APIRouter(prefix="/api", tags=["Subscribers"])
+
+
+def _row_to_out(r: dict) -> SubscriberOut:
+    """Convert a DB row dict to SubscriberOut, hiding the raw PIN."""
+    return SubscriberOut(
+        id=r["id"],
+        name=r["name"],
+        phone=r["phone"],
+        email=r["email"],
+        escalation_order=r["escalation_order"],
+        active=bool(r["active"]),
+        has_pin=bool(r.get("pin")),
+        created_at=r["created_at"],
+    )
 
 
 @router.get(
@@ -24,19 +38,7 @@ router = APIRouter(prefix="/api", tags=["Subscribers"])
 )
 async def get_subscribers():
     rows = database.get_subscribers_ordered()
-    return [
-        SubscriberOut(
-            id=r["id"],
-            name=r["name"],
-            phone=r["phone"],
-            email=r["email"],
-            escalation_order=r["escalation_order"],
-            active=bool(r["active"]),
-            has_push_subscription=bool(r.get("push_subscription")),
-            created_at=r["created_at"],
-        )
-        for r in rows
-    ]
+    return [_row_to_out(r) for r in rows]
 
 
 @router.post(
@@ -57,7 +59,8 @@ async def add_subscriber(body: SubscriberIn, request: Request):
         )
 
     sub_id = database.add_subscriber(
-        body.name, body.phone, body.email, body.escalation_order
+        body.name, body.phone, body.email, body.escalation_order,
+        pin=body.pin,           # optional; hashed inside the query layer
     )
     if sub_id == -1:
         raise HTTPException(
@@ -65,16 +68,7 @@ async def add_subscriber(body: SubscriberIn, request: Request):
             detail="Escalation order already in use or database error",
         )
     row = database.get_subscriber_by_order(body.escalation_order)
-    return SubscriberOut(
-        id=row["id"],
-        name=row["name"],
-        phone=row["phone"],
-        email=row["email"],
-        escalation_order=row["escalation_order"],
-        active=bool(row["active"]),
-        has_push_subscription=bool(row.get("push_subscription")),
-        created_at=row["created_at"],
-    )
+    return _row_to_out(row)
 
 
 @router.delete(
@@ -101,3 +95,24 @@ async def save_push_subscription(subscriber_id: int, body: PushSubscriptionIn):
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
     return {"status": "saved"}
+
+
+@router.post(
+    "/subscribers/{subscriber_id}/set-pin",
+    summary="Set subscriber PIN",
+    description=(
+        "Admin endpoint to set or update a subscriber's 4-6 digit numeric PIN. "
+        "PIN is stored as a SHA-256 hash — never in plain text."
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def set_subscriber_pin(subscriber_id: int, body: SetPinIn):
+    if body.subscriber_id != subscriber_id:
+        raise HTTPException(
+            status_code=400,
+            detail="subscriber_id in path and body must match",
+        )
+    ok = database.set_subscriber_pin(subscriber_id, body.pin)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    return {"status": "pin_set", "subscriber_id": subscriber_id}

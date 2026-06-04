@@ -20,8 +20,11 @@ _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 load_dotenv(dotenv_path=os.path.join(_root, f".env.{APP_ENV}"))
 
 # ── Threshold defaults ────────────────────────────────────────────────────────
-TEMP_THRESHOLD_HIGH: float = float(os.getenv("TEMP_THRESHOLD_HIGH", "40.0"))
-TEMP_THRESHOLD_LOW: float  = float(os.getenv("TEMP_THRESHOLD_LOW",  "35.0"))
+# Industrial cooling process:
+#   HIGH = 90.0°C  — overheating danger
+#   LOW  = 40.0°C  — machine cooled and ready for next process
+TEMP_THRESHOLD_HIGH: float = float(os.getenv("TEMP_THRESHOLD_HIGH", "90.0"))
+TEMP_THRESHOLD_LOW: float  = float(os.getenv("TEMP_THRESHOLD_LOW",  "40.0"))
 
 # ── SMTP ──────────────────────────────────────────────────────────────────────
 SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")

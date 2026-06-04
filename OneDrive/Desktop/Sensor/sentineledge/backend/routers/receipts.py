@@ -1,0 +1,75 @@
+"""
+routers/receipts.py — Delivery receipt endpoints.
+
+Endpoints:
+    GET /api/receipts?limit=100&channel=all&status=all
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Query
+
+from middleware.auth import require_admin
+from database.connection import execute_read
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+router = APIRouter(prefix="/api", tags=["Receipts"])
+
+
+@router.get("/receipts", dependencies=[Depends(require_admin)])
+async def get_receipts(
+    limit:   int = Query(100, ge=1, le=500),
+    channel: str = Query("all"),
+    status:  str = Query("all"),
+):
+    """
+    Return delivery receipts joined with alert and subscriber info.
+    channel: all | email | sms
+    status:  all | success | failed
+    """
+    try:
+        where_clauses = []
+        params: list = []
+
+        if channel != "all":
+            where_clauses.append("dr.channel = ?")
+            params.append(channel)
+
+        if status == "success":
+            where_clauses.append("dr.success = 1")
+        elif status == "failed":
+            where_clauses.append("dr.success = 0")
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        rows = execute_read(
+            f"""
+            SELECT
+                dr.id,
+                dr.alert_id,
+                dr.channel,
+                dr.escalation_level,
+                dr.sent_at,
+                dr.success,
+                dr.error_message,
+                a.value         AS alert_value,
+                a.parameter     AS alert_parameter,
+                a.severity      AS alert_severity,
+                a.timestamp     AS alert_time,
+                s.name          AS subscriber_name
+            FROM delivery_receipts dr
+            LEFT JOIN alerts       a ON dr.alert_id = a.id
+            LEFT JOIN subscribers  s ON dr.subscriber_id = s.id
+            {where_sql}
+            ORDER BY dr.id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+
+        return [dict(r) for r in rows]
+
+    except Exception as exc:
+        logger.error("get_receipts failed: %s", exc)
+        return []

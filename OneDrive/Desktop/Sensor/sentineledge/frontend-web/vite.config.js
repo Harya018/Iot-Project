@@ -3,21 +3,22 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    outDir: '../backend/static',
+    emptyOutDir: true,
+  },
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'https://localhost:5000',
+        secure: false,
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: 'wss://localhost:5000',
         ws: true,
-        changeOrigin: true,
-      },
-    },
-  },
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-  },
+        secure: false,
+      }
+    }
+  }
 })

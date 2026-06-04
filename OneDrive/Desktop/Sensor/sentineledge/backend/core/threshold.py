@@ -6,8 +6,8 @@ and returns a list of BreachEvent objects for any exceeded thresholds,
 respecting per-direction cooldown windows.
 
 BREACH BOUNDARY (strict):
-  temperature > 40.0  → high breach  (exactly 40.0 is NOT a breach)
-  temperature < 35.0  → low breach   (exactly 35.0 is NOT a breach)
+  temperature > HIGH  → high breach   (exactly HIGH is NOT a breach)
+  temperature < LOW   → low breach    (exactly LOW  is NOT a breach)
 
 Severity levels:
   WARNING   — value within 0-10% beyond threshold
@@ -15,6 +15,15 @@ Severity levels:
   EMERGENCY — value more than 25% beyond threshold
 
 Cooldown is tracked per direction (high / low) independently.
+
+DIRECTION TRACKING (cooling-cycle logic):
+  For a machine that cools from HIGH → LOW, we only want to fire the
+  LOW alert once per cooling run:
+
+  - When temperature rises back above RESET_TEMP (60°C), the LOW
+    direction is "reset" so the next cooling cycle will fire again.
+  - This prevents multiple LOW alerts during the same cool-down run
+    while the temperature hovers just around the LOW threshold.
 """
 
 from __future__ import annotations
@@ -25,15 +34,19 @@ from config import RUNTIME_THRESHOLDS, ALERT_COOLDOWN_SECONDS, MODULE_STATUS
 from models import BreachEvent
 
 # ─── Severity bands ───────────────────────────────────────────────────────────
-_WARNING_PCT: float = 0.05
+_WARNING_PCT: float  = 0.05
 _CRITICAL_PCT: float = 0.10
-_EMERGENCY_PCT: float = 0.25
+_EMERGENCY_PCT: float= 0.25
+
+# Temperature above which the LOW-direction alert is "reset" for the next run.
+# When machine heats back above this after a cooling cycle,
+# we know a new run has started.
+_LOW_DIRECTION_RESET_TEMP: float = 60.0
 
 
 def _get_severity(value: float, threshold: float, direction: str) -> str:
     """
     Compute breach severity based on how far the value exceeds the threshold.
-
     Returns "WARNING", "CRITICAL", or "EMERGENCY".
     """
     if threshold == 0:
@@ -51,10 +64,17 @@ def _get_severity(value: float, threshold: float, direction: str) -> str:
         return "WARNING"
 
 
-# ─── Cooldown tracker: keyed by direction ─────────────────────────────────────
+# ─── Cooldown tracker: keyed by direction ────────────────────────────────────
 cooldown_tracker: dict[str, datetime | None] = {
     "temperature_high": None,
     "temperature_low":  None,
+}
+
+# ─── Direction tracker: prevents duplicate LOW alerts per cooling run ─────────
+# Tracks whether the LOW direction has already fired in the current run.
+# Reset when temperature rises back above _LOW_DIRECTION_RESET_TEMP.
+last_breach_direction: dict[str, str | None] = {
+    "temperature": None,   # last direction that fired: "high" | "low" | None
 }
 
 
@@ -77,16 +97,32 @@ def check_threshold(reading: dict) -> list[BreachEvent]:
     cooldown_delta = timedelta(seconds=ALERT_COOLDOWN_SECONDS)
     breaches: list[BreachEvent] = []
 
+    temp  = reading["temperature"]
+    t_high = RUNTIME_THRESHOLDS["temp_high"]
+    t_low  = RUNTIME_THRESHOLDS["temp_low"]
+
+    # ── Reset LOW direction when machine heats back up ────────────────────────
+    # This means a new cooling run is starting; the next crossing of LOW
+    # should fire a fresh alert.
+    if temp > _LOW_DIRECTION_RESET_TEMP:
+        last_breach_direction["temperature"] = None
+
     checks = [
-        ("temperature", reading["temperature"], RUNTIME_THRESHOLDS["temp_high"], "high"),
-        ("temperature", reading["temperature"], RUNTIME_THRESHOLDS["temp_low"],  "low"),
+        ("temperature", temp, t_high, "high"),
+        ("temperature", temp, t_low,  "low"),
     ]
 
     for parameter, value, threshold, direction in checks:
         # STRICT boundary: exactly at threshold is NOT a breach
-        if direction == "high" and value <= threshold:   # need value > threshold
+        if direction == "high" and value <= threshold:
             continue
-        if direction == "low"  and value >= threshold:   # need value < threshold
+        if direction == "low"  and value >= threshold:
+            continue
+
+        # ── Cooling-run duplicate suppression for LOW direction ───────────────
+        # If we already fired a LOW alert in this cooling run, skip.
+        # The run resets when temperature climbs back above _LOW_DIRECTION_RESET_TEMP.
+        if direction == "low" and last_breach_direction.get(parameter) == "low":
             continue
 
         # Unique key per direction
@@ -94,14 +130,16 @@ def check_threshold(reading: dict) -> list[BreachEvent]:
         last_trigger = cooldown_tracker.get(key)
 
         if last_trigger is not None and (now - last_trigger) < cooldown_delta:
-            # Still within cooldown window — skip without creating an alert
+            # Still within cooldown window — skip
             continue
 
         # Compute severity
         severity = _get_severity(value, threshold, direction)
 
-        # Record this trigger and add a breach event
+        # Record this trigger
         cooldown_tracker[key] = now
+        last_breach_direction[parameter] = direction
+
         breaches.append(
             BreachEvent(
                 parameter=parameter,
