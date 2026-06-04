@@ -3,7 +3,7 @@
  * Threshold config, demo controls (CSV playback), and admin info.
  */
 import { useState, useEffect, useCallback } from 'react'
-import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle } from 'lucide-react'
+import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle } from 'lucide-react'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
   simulateBreach, createBackup, fetchHealth,
@@ -58,6 +58,11 @@ export default function SettingsPage() {
   const [backing, setBacking] = useState(false)
   const [health,  setHealth]  = useState(null)
 
+  // ── Email test state ─────────────────────────────────────────────────────────
+  const [testEmailAddr,  setTestEmailAddr]  = useState('crharya@gmail.com')
+  const [testingEmail,   setTestingEmail]   = useState(false)
+  const [testEmailMsg,   setTestEmailMsg]   = useState(null)
+
   // ── Load data ────────────────────────────────────────────────────────────────
   const loadThresholds = useCallback(async () => {
     try {
@@ -73,6 +78,11 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => { loadThresholds(); loadHealth() }, [loadThresholds, loadHealth])
+
+  // Pre-fill test email from health when it loads
+  useEffect(() => {
+    if (health?.smtp_user) setTestEmailAddr(health.smtp_user)
+  }, [health])
 
   // ── Threshold handlers ───────────────────────────────────────────────────────
   const handleUpdate = async (e) => {
@@ -149,6 +159,35 @@ export default function SettingsPage() {
       addToast({ type:'success', message:`✅ Backup created: ${r.filename} (${r.size_mb} MB)` })
     } catch (err) { addToast({ type:'error', message:'Backup failed: ' + err.message }) }
     finally { setBacking(false) }
+  }
+
+  // ── Test Email ────────────────────────────────────────────────────────────────
+  const handleTestEmail = async () => {
+    if (!testEmailAddr.trim()) return
+    setTestingEmail(true); setTestEmailMsg(null)
+    try {
+      const res = await fetch('/api/admin/test-email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Password': sessionStorage.getItem('adminPassword') || 'admin123',
+        },
+        body: JSON.stringify({ email: testEmailAddr.trim() }),
+        credentials: 'include',
+      })
+      const data = await res.json()
+      if (res.ok && data.status === 'sent') {
+        setTestEmailMsg({ type: 'success', text: `✅ Test email sent to ${data.email}` })
+        addToast({ type: 'success', message: `📧 Test email sent to ${data.email}` })
+      } else {
+        const err = data.error || data.detail || 'Unknown error'
+        setTestEmailMsg({ type: 'error', text: `Failed: ${err}` })
+        addToast({ type: 'error', message: `Email failed: ${err}` })
+      }
+    } catch (err) {
+      setTestEmailMsg({ type: 'error', text: 'Failed: ' + err.message })
+      addToast({ type: 'error', message: 'Email test error: ' + err.message })
+    } finally { setTestingEmail(false) }
   }
 
   const isOverride = threshData?.source === 'runtime_override'
@@ -354,7 +393,67 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* ── Section 3: Admin Info ───────────────────────────────────────── */}
+        {/* ── Section 3: Email Configuration ──────────────────────────── */}
+        <Section title="Email Configuration" icon={Mail}>
+          <div className="space-y-4">
+
+            {/* SMTP status */}
+            <div className="flex items-center justify-between py-2 border-b border-gray-100">
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <Mail size={13} />
+                <span className="font-medium">SMTP User</span>
+              </div>
+              <span className="text-xs font-semibold text-gray-700">
+                {health?.smtp_user || 'crharya@gmail.com'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between py-2 border-b border-gray-100">
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <CheckCircle size={13} />
+                <span className="font-medium">Email Status</span>
+              </div>
+              <span className={`text-xs font-semibold ${
+                health?.modules?.email === 'ok' ? 'text-emerald-600' : 'text-amber-600'
+              }`}>
+                {health?.modules?.email === 'ok' ? '✓ Configured' : '⚠ Not yet verified'}
+              </span>
+            </div>
+
+            {/* Test email form */}
+            <div className="rounded-xl bg-indigo-50 border border-indigo-200 p-4 space-y-3">
+              <p className="text-xs font-semibold text-indigo-800">
+                📧 Send Test HTML Email
+              </p>
+              <p className="text-xs text-indigo-600 leading-relaxed">
+                Sends a professional HTML alert email immediately — no breach required.
+                Use this to verify the email template renders correctly in Gmail.
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="email"
+                  value={testEmailAddr}
+                  onChange={e => setTestEmailAddr(e.target.value)}
+                  placeholder="recipient@example.com"
+                  className="form-input flex-1 text-xs"
+                />
+                <button
+                  onClick={handleTestEmail}
+                  disabled={testingEmail || !testEmailAddr.trim()}
+                  className="btn btn-sm flex-shrink-0 flex items-center gap-1.5"
+                  style={{ background: '#4F46E5', color: '#fff', border: 'none' }}
+                >
+                  {testingEmail
+                    ? <><RefreshCw size={13} className="animate-spin" /> Sending…</>
+                    : <><Mail size={13} /> Send Test Email</>
+                  }
+                </button>
+              </div>
+              <StatusMsg msg={testEmailMsg} />
+            </div>
+          </div>
+        </Section>
+
+        {/* ── Section 4: Admin Info ───────────────────────────────────────── */}
         <Section title="Admin Info" icon={Info}>
           <div className="space-y-3">
             {[

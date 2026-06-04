@@ -21,7 +21,7 @@ export default function SubscriberManager() {
 
   useEffect(() => { load() }, [load])
 
-  const ORDER_LABELS = { 1:'Primary', 2:'Escalation 2', 3:'Final' }
+  const subLabel = (order) => `Subscriber ${order}`
 
   return (
     <Card
@@ -50,7 +50,7 @@ export default function SubscriberManager() {
                   <td className="hidden sm:table-cell text-gray-500">{s.phone}</td>
                   <td>
                     <span className="text-xs font-medium text-gray-600">
-                      {ORDER_LABELS[s.escalation_order] || `#${s.escalation_order}`}
+                      {subLabel(s.escalation_order)}
                     </span>
                   </td>
                   <td>

@@ -63,10 +63,10 @@ export default function MiniAlertLog({ limit = 5, onCountChange }) {
             </div>
             {!alert.acknowledged ? (
               <button onClick={() => handleAck(alert)} className="btn btn-ghost btn-xs flex-shrink-0">
-                Ack
+                Seen
               </button>
             ) : (
-              <span className="text-xs text-emerald-600 flex-shrink-0">✓ {alert.acknowledged_by}</span>
+              <span className="text-xs text-emerald-600 flex-shrink-0">✓ Seen</span>
             )}
           </div>
         )

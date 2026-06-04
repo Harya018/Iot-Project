@@ -1,18 +1,18 @@
+# -*- coding: utf-8 -*-
 """
-core/escalation.py — SentinelEdge alert escalation engine.
+core/escalation.py — SentinelEdge alert delivery engine (simplified).
 
 DELIVERY RULE: When a threshold breach fires, ALL THREE channels
 (Email, SMS, In-App WebSocket) are sent to ALL active subscribers
 simultaneously using asyncio.gather(). Failure of one channel never
 blocks the others.
 
-ESCALATION (system-wide re-alert, not per-person routing):
-  Level 1: Immediate — all channels fire to all subscribers
-  Level 2: After 60s with no acknowledgement — re-alert everyone
-  Level 3: After another 60s — final alert to everyone, max_escalated=True
+ONE-SHOT DELIVERY: Alerts fire exactly once (level 1) and stop.
+No background re-alert timers. No level 2 or level 3.
+The escalation_level column always stays at 1.
 
-ACKNOWLEDGE: Any subscriber can acknowledge. First acknowledgement
-stops all further escalation.
+ACKNOWLEDGE: Admin can manually mark alerts as seen from the dashboard.
+The system never calls acknowledge automatically.
 
 DELIVERY RECEIPTS: Logged per alert per subscriber per channel.
 """
@@ -25,16 +25,17 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import database
-from modules.email.smtp import send_email_async
-from modules.email.templates import format_alert_message
+from modules.email.smtp import send_alert_email_async
+from modules.email.smtp import send_email_async  # kept for daily reports / legacy
 from modules.sms.gateway import send_sms_async
 from modules.inapp.broadcaster import send_push_async
-from config import ESCALATION_TIMEOUT_SECONDS, RUNTIME_THRESHOLDS
+from utils.formatter import format_alert_message   # used by _build_message (SMS body)
+from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS
 from models import BreachEvent
 
 logger = logging.getLogger("sentineledge.escalation")
 
-# Track all running escalation asyncio.Task objects for graceful shutdown
+# No background escalation tasks — kept as empty dict for API compatibility
 active_escalations: dict[int, asyncio.Task] = {}
 
 
@@ -45,45 +46,44 @@ def _build_message(
     value: float,
     threshold: float,
     direction: str,
-    level: int,
+    severity: str = "WARNING",
 ) -> str:
-    base = format_alert_message(parameter, value, threshold, direction)
-    timeout_2x = ESCALATION_TIMEOUT_SECONDS * 2
-
-    if level == 1:
-        return f"SentinelEdge ALERT: {base}. Please acknowledge in the app."
-    elif level == 2:
-        return (
-            f"SentinelEdge ESCALATION Level 2: {base}. "
-            f"No response received. Immediate action required."
-        )
-    else:
-        return (
-            f"SentinelEdge CRITICAL Level 3 FINAL: {base}. "
-            f"Unacknowledged for {timeout_2x} seconds."
-        )
+    """Build the SMS/plain-text alert body. Always level 1 language."""
+    unit = "°C" if parameter == "temperature" else "%"
+    base = format_alert_message(parameter, value, threshold, direction, severity, unit)
+    return f"SentinelEdge Alert: {base}. Please check the dashboard."
 
 
 # ─── Per-subscriber channel dispatcher ───────────────────────────────────────
 
 async def _notify_subscriber(
     alert_id: int,
-    level: int,
     subscriber: dict,
     message: str,
+    alert_meta: dict | None = None,
 ) -> None:
     """
     Fire ALL THREE channels (email, SMS, in-app) to one subscriber in parallel.
     Each channel failure is logged independently and never blocks the others.
     """
-    subject = f"SentinelEdge Alert (Level {level})"
     sub_id = subscriber["id"]
+    level  = 1  # always level 1
 
-    # ── Channel 1: Email (always) ─────────────────────────────────────────────
+    # ── Channel 1: HTML Email ─────────────────────────────────────────────────
     async def _email() -> None:
         err: Optional[str] = None
         try:
-            ok = await send_email_async(subscriber["email"], subject, message)
+            meta = alert_meta or {}
+            ok = await send_alert_email_async(
+                recipient_email=subscriber["email"],
+                recipient_name=subscriber.get("name", "Operator"),
+                temperature=float(meta.get("value", 0.0)),
+                threshold=float(meta.get("threshold", 0.0)),
+                direction=str(meta.get("direction", "high")),
+                severity=str(meta.get("severity", "WARNING")),
+                escalation_level=level,
+                timestamp_utc=str(meta.get("timestamp", "") or ""),
+            )
         except Exception as exc:
             ok = False
             err = str(exc)
@@ -91,11 +91,11 @@ async def _notify_subscriber(
         database.insert_receipt(alert_id, "email", sub_id, level, ok, err)
         if not ok:
             logger.warning(
-                "Email to %s (sub %d) failed at level %d",
-                subscriber["email"], sub_id, level,
+                "Email to %s (sub %d) failed",
+                subscriber["email"], sub_id,
             )
 
-    # ── Channel 2: SMS (always) ───────────────────────────────────────────────
+    # ── Channel 2: SMS ────────────────────────────────────────────────────────
     async def _sms() -> None:
         err: Optional[str] = None
         try:
@@ -107,11 +107,11 @@ async def _notify_subscriber(
         database.insert_receipt(alert_id, "sms", sub_id, level, ok, err)
         if not ok:
             logger.warning(
-                "SMS to %s (sub %d) failed at level %d",
-                subscriber["phone"], sub_id, level,
+                "SMS to %s (sub %d) failed",
+                subscriber["phone"], sub_id,
             )
 
-    # ── Channel 3: In-App WebSocket push (always) ─────────────────────────────
+    # ── Channel 3: In-App WebSocket push ─────────────────────────────────────
     async def _push() -> None:
         push_sub = subscriber.get("push_subscription")
         err: Optional[str] = None
@@ -121,6 +121,7 @@ async def _notify_subscriber(
             )
             return
         try:
+            subject = "SentinelEdge Alert"
             ok = await send_push_async(push_sub, subject, message, {"alert_id": alert_id})
         except Exception as exc:
             ok = False
@@ -128,13 +129,13 @@ async def _notify_subscriber(
         database.log_escalation(alert_id, level, sub_id, "inapp", ok)
         database.insert_receipt(alert_id, "inapp", sub_id, level, ok, err)
         if not ok:
-            logger.warning("In-app push to sub %d failed at level %d", sub_id, level)
+            logger.warning("In-app push to sub %d failed", sub_id)
 
     # Fire all three in parallel — failure of one never blocks others
     await asyncio.gather(_email(), _sms(), _push(), return_exceptions=True)
     logger.info(
-        "All channels dispatched to %s (sub %d, level=%d, alert_id=%d)",
-        subscriber["name"], sub_id, level, alert_id,
+        "All channels dispatched to %s (sub %d, alert_id=%d)",
+        subscriber["name"], sub_id, alert_id,
     )
 
 
@@ -142,92 +143,41 @@ async def _notify_subscriber(
 
 async def _notify_all_subscribers(
     alert_id: int,
-    level: int,
     parameter: str,
     value: float,
     threshold: float,
     direction: str,
 ) -> None:
     """
-    Build the level-specific message and fire all channels to every
-    active subscriber simultaneously.
+    Build the alert message and fire all channels to every
+    active subscriber simultaneously. Always fires at level 1.
     """
-    message = _build_message(parameter, value, threshold, direction, level)
+    # Fetch alert metadata for the HTML email builder
+    alert_meta = database.get_alert(alert_id) or {}
+    severity   = alert_meta.get("severity", "WARNING")
+
+    message     = _build_message(parameter, value, threshold, direction, severity)
     subscribers = database.get_subscribers_ordered()
     active_subs = [s for s in subscribers if s.get("active", True)]
 
     if not active_subs:
         logger.warning(
-            "No active subscribers to notify for alert %d (level %d)", alert_id, level
+            "No active subscribers to notify for alert %d", alert_id
         )
         return
 
-    database.update_escalation_level(alert_id, level)
+    # Always set escalation_level = 1
+    database.update_escalation_level(alert_id, 1)
 
     tasks = [
-        _notify_subscriber(alert_id, level, sub, message)
+        _notify_subscriber(alert_id, sub, message, alert_meta)
         for sub in active_subs
     ]
     await asyncio.gather(*tasks, return_exceptions=True)
     logger.info(
-        "Level %d notifications complete for alert %d — %d subscriber(s) notified",
-        level, alert_id, len(active_subs),
+        "Alert notifications complete for alert %d — %d subscriber(s) notified",
+        alert_id, len(active_subs),
     )
-
-
-# ─── Escalation background task ──────────────────────────────────────────────
-
-async def run_escalation(alert_id: int, severity: str = "WARNING") -> None:
-    """
-    System-wide escalation coroutine for a single alert.
-
-    Level 1 was already dispatched by trigger_alert().
-    This coroutine handles levels 2 and 3 after timeout intervals.
-    """
-    try:
-        alert = database.get_alert(alert_id)
-        if not alert:
-            logger.error("run_escalation: alert_id %d not found in DB", alert_id)
-            return
-
-        # ── Level 2: wait, then re-alert everyone ─────────────────────────────
-        await asyncio.sleep(ESCALATION_TIMEOUT_SECONDS)
-
-        alert = database.get_alert(alert_id)
-        if not alert or alert["acknowledged"]:
-            logger.info("Alert %d acknowledged before level-2 escalation.", alert_id)
-            return
-
-        await _notify_all_subscribers(
-            alert_id, 2,
-            alert["parameter"], alert["value"],
-            alert["threshold"], alert["direction"],
-        )
-
-        # ── Level 3: wait again, then final alert ─────────────────────────────
-        await asyncio.sleep(ESCALATION_TIMEOUT_SECONDS)
-
-        alert = database.get_alert(alert_id)
-        if not alert or alert["acknowledged"]:
-            logger.info("Alert %d acknowledged before level-3 escalation.", alert_id)
-            return
-
-        await _notify_all_subscribers(
-            alert_id, 3,
-            alert["parameter"], alert["value"],
-            alert["threshold"], alert["direction"],
-        )
-        database.set_max_escalated(alert_id)
-        logger.info("Escalation chain completed (max) for alert %d.", alert_id)
-
-    except asyncio.CancelledError:
-        logger.info("Escalation task for alert %d was cancelled.", alert_id)
-    except Exception as exc:
-        logger.exception(
-            "Unexpected error in run_escalation for alert %d: %s", alert_id, exc
-        )
-    finally:
-        active_escalations.pop(alert_id, None)
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -238,11 +188,9 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
 
     For each breach:
       1. Persist alert in DB (threshold read from RUNTIME_THRESHOLDS)
-      2. Immediately notify ALL active subscribers on ALL channels (level 1)
-      3. Spawn background escalation task for levels 2 and 3
+      2. Immediately notify ALL active subscribers on ALL channels
+      3. Stop. No background re-alert timers.
     """
-    from config import ALERT_COOLDOWN_SECONDS
-
     alert_ids = []
     now = datetime.now(timezone.utc)
     cooldown_until = (now + timedelta(seconds=ALERT_COOLDOWN_SECONDS)).isoformat()
@@ -276,67 +224,39 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
             live_threshold, breach.direction, severity,
         )
 
-        # Level 1 — immediate, all subscribers, all channels
+        # Fire once to all subscribers on all channels — then stop
         await _notify_all_subscribers(
-            alert_id, 1,
+            alert_id,
             breach.parameter, breach.value,
             live_threshold, breach.direction,
         )
-
-        # Spawn background escalation for levels 2 and 3
-        task = asyncio.create_task(
-            run_escalation(alert_id, severity),
-            name=f"escalation-{alert_id}",
-        )
-        active_escalations[alert_id] = task
 
     return alert_ids
 
 
 async def acknowledge(alert_id: int, acknowledged_by: str) -> bool:
     """
-    Mark an alert as acknowledged.
-    The running escalation task polls the DB and stops naturally.
+    Mark an alert as seen (optional, manual action from dashboard).
+    The system never calls this automatically.
     """
     ok = database.acknowledge_alert(alert_id, acknowledged_by)
     if ok:
-        logger.info("Alert %d acknowledged by '%s'.", alert_id, acknowledged_by)
+        logger.info("Alert %d marked as seen by '%s'.", alert_id, acknowledged_by)
     else:
-        logger.error("Failed to acknowledge alert %d.", alert_id)
+        logger.error("Failed to mark alert %d as seen.", alert_id)
     return ok
 
 
 async def resume_pending_escalations() -> None:
     """
-    Called once at startup — resume escalation tasks for unacknowledged alerts.
+    Called at startup — no-op in simplified delivery mode.
+    Kept for API compatibility with main.py startup sequence.
     """
-    pending = database.get_unacknowledged_alerts()
-    if not pending:
-        return
-
-    logger.info(
-        "Resuming escalation for %d pending alert(s) after restart.", len(pending)
-    )
-    for alert in pending:
-        if not alert.get("max_escalated"):
-            severity = alert.get("severity", "WARNING")
-            task = asyncio.create_task(
-                run_escalation(alert["id"], severity),
-                name=f"escalation-resume-{alert['id']}",
-            )
-            active_escalations[alert["id"]] = task
+    logger.info("One-shot delivery mode: no escalation tasks to resume.")
 
 
 async def shutdown_escalations() -> None:
     """
-    Called at server shutdown.
-    In-flight tasks remain in DB as unacknowledged so
-    resume_pending_escalations() picks them up on next restart.
+    Called at server shutdown — no-op in simplified delivery mode.
     """
-    if not active_escalations:
-        return
-    logger.info(
-        "Shutdown: %d escalation task(s) in flight — they will resume on restart.",
-        len(active_escalations),
-    )
-    active_escalations.clear()
+    pass

@@ -15,12 +15,6 @@ function sev2badge(s) {
   return m[s?.toUpperCase()] || 'gray'
 }
 
-function escBadge(level) {
-  if (level >= 3) return { color:'red', label:'CRITICAL', pulse:true }
-  if (level === 2) return { color:'orange', label:'Escalated' }
-  return { color:'amber', label:'Level 1' }
-}
-
 export default function AlertLog({ onCountChange }) {
   const [alerts,   setAlerts]   = useState([])
   const [loading,  setLoading]  = useState(false)
@@ -74,7 +68,7 @@ export default function AlertLog({ onCountChange }) {
   )
 
   return (
-    <Card title="Alert Log" subtitle="Last 30 events" headerRight={headerRight} noPadding>
+    <Card title="Alert History" subtitle="Last 30 events" headerRight={headerRight} noPadding>
       {alerts.length === 0 ? (
         <div className="flex flex-col items-center gap-2 py-12 text-gray-400">
           <CheckCircle size={32} className="text-emerald-400" />
@@ -90,7 +84,6 @@ export default function AlertLog({ onCountChange }) {
                 <th>Reading</th>
                 <th>Time</th>
                 <th>Delivery</th>
-                <th>Level</th>
                 <th>Action</th>
               </tr>
             </thead>
@@ -98,7 +91,6 @@ export default function AlertLog({ onCountChange }) {
               {alerts.slice(0, 30).map(alert => {
                 const sc = getSeverityColor(alert.severity)
                 const ds = alert.delivery_status || {}
-                const eb = escBadge(alert.escalation_level)
                 return (
                   <tr key={alert.id}>
                     {/* Severity */}
@@ -137,22 +129,19 @@ export default function AlertLog({ onCountChange }) {
                         <MessageSquare size={11} className="text-gray-400" />
                       </div>
                     </td>
-                    {/* Escalation level */}
-                    <td>
-                      <Badge color={eb.color} label={eb.label} pulse={eb.pulse} small />
-                    </td>
+                    {/* Escalation level — removed */}
                     {/* Acknowledge */}
                     <td>
                       {alert.acknowledged ? (
                         <div className="flex items-center gap-1 text-emerald-600 text-xs">
                           <CheckCheck size={13} />
                           <span className="truncate max-w-[80px]" title={alert.acknowledged_by}>
-                            {alert.acknowledged_by || 'Acked'}
+                            {alert.acknowledged_by || 'Seen'}
                           </span>
                         </div>
                       ) : (
                         <button onClick={() => handleAck(alert)} className="btn btn-ghost btn-xs">
-                          Ack
+                          Mark as Seen
                         </button>
                       )}
                     </td>

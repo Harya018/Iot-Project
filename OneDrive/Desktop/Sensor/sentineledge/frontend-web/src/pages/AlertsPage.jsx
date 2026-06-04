@@ -9,12 +9,7 @@ import { getSeverityColor, getDirectionLabel, getSeverityLabel } from '../utils/
 import { utcToIST, timeAgo } from '../utils/time.js'
 import Badge from '../components/shared/Badge.jsx'
 
-const SEV_COLORS  = { WARNING:'amber', CRITICAL:'orange', EMERGENCY:'red' }
-const escBadge = (level) => {
-  if (level >= 3) return { color:'red', label:'CRITICAL ESC', pulse:true }
-  if (level === 2) return { color:'orange', label:'Escalated' }
-  return { color:'amber', label:'Level 1' }
-}
+const SEV_COLORS = { WARNING:'amber', CRITICAL:'orange', EMERGENCY:'red' }
 
 export default function AlertsPage({ onCountChange }) {
   const [alerts,   setAlerts]   = useState([])
@@ -153,14 +148,12 @@ export default function AlertsPage({ onCountChange }) {
                 <th>Direction</th>
                 <th>Time (IST)</th>
                 <th>Delivery</th>
-                <th>Escalation</th>
                 <th>Action</th>
               </tr></thead>
               <tbody>
                 {filtered.map(alert => {
-                  const sc = getSeverityColor(alert.severity)
+                      const sc = getSeverityColor(alert.severity)
                   const ds = alert.delivery_status || {}
-                  const eb = escBadge(alert.escalation_level)
                   return (
                     <tr key={alert.id}>
                       <td>
@@ -189,15 +182,14 @@ export default function AlertsPage({ onCountChange }) {
                           <MessageSquare size={11} className="text-gray-300" />
                         </div>
                       </td>
-                      <td><Badge color={eb.color} label={eb.label} pulse={eb.pulse} small /></td>
                       <td>
                         {alert.acknowledged ? (
                           <div className="flex items-center gap-1 text-emerald-600 text-xs">
                             <CheckCheck size={13} />
-                            <span className="truncate max-w-[80px]">{alert.acknowledged_by || 'Acked'}</span>
+                            <span className="truncate max-w-[80px]">{alert.acknowledged_by || 'Seen'}</span>
                           </div>
                         ) : (
-                          <button onClick={() => handleAck(alert)} className="btn btn-ghost btn-xs">Ack</button>
+                          <button onClick={() => handleAck(alert)} className="btn btn-ghost btn-xs">Mark as Seen</button>
                         )}
                       </td>
                     </tr>

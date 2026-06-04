@@ -16,11 +16,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import database
-from config import ADMIN_PASSWORD
+from config import ADMIN_PASSWORD, SMTP_USER
 from middleware.auth import require_admin
 from models import ConfigChangeOut
 from database.backup import create_backup, get_backup_list
 from database.retention import get_database_stats
+from modules.email.smtp import send_alert_email
 from utils.logger import get_logger
 from utils.time import now_iso
 
@@ -185,3 +186,46 @@ async def import_csv(body: _ImportCsvIn):
             content={"error": "Import failed", "detail": str(exc)},
         )
 
+class _TestEmailIn(BaseModel):
+    email: str
+
+
+@router.post(
+    "/admin/test-email",
+    summary="Send a test HTML alert email",
+    description=(
+        "Immediately sends a test HTML email to the given address using dummy "
+        "data. Use this to verify the email template without triggering a breach. "
+        "Requires admin auth."
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def test_email(body: _TestEmailIn):
+    """Send a test HTML email to verify the Module 2 template."""
+    import asyncio
+    try:
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None,
+            send_alert_email,
+            body.email,          # recipient_email
+            "Test Operator",     # recipient_name
+            37.5,                # temperature
+            38.0,                # threshold
+            "low",               # direction
+            "WARNING",           # severity
+            1,                   # escalation_level
+            now_iso(),           # timestamp_utc
+        )
+        if ok:
+            logger.info("Test email sent to %s", body.email)
+            return {"status": "sent", "email": body.email}
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": "SMTP send returned False — check server logs"},
+        )
+    except Exception as exc:
+        logger.error("test_email failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": str(exc)},
+        )

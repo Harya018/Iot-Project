@@ -112,17 +112,21 @@ def format_email_subject(
     """
     Return a short, descriptive email subject line.
 
-    Example:
-        "[CRITICAL] SentinelEdge Alert \u2014 Temperature HIGH \u2014 Escalation Level 2"
+    Level 1: "SentinelEdge Alert \u2014 Temperature HIGH"
+    Level 2: "SentinelEdge ESCALATION L2 \u2014 Temperature HIGH \u2014 No Response"
+    Level 3: "SentinelEdge CRITICAL L3 FINAL \u2014 Temperature HIGH"
     """
     param_name = parameter.capitalize()
-    dir_label = direction.upper()
+    dir_label  = direction.upper()
     if level == 1:
-        return f"[{severity}] SentinelEdge Alert \u2014 {param_name} {dir_label}"
-    return (
-        f"[{severity}] SentinelEdge Alert \u2014 "
-        f"{param_name} {dir_label} \u2014 Escalation Level {level}"
-    )
+        return f"SentinelEdge Alert \u2014 {param_name} {dir_label}"
+    elif level == 2:
+        return (
+            f"SentinelEdge ESCALATION L2 \u2014 "
+            f"{param_name} {dir_label} \u2014 No Response"
+        )
+    else:
+        return f"SentinelEdge CRITICAL L3 FINAL \u2014 {param_name} {dir_label}"
 
 
 def format_sms_message(

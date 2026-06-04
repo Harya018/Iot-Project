@@ -10,9 +10,9 @@ import Modal from '../components/shared/Modal.jsx'
 
 const EMPTY_FORM = { name:'', phone:'', email:'', escalation_order:1, pin:'' }
 const ORDER_META = {
-  1: { label:'Primary Responder',   color:'#EF4444', bg:'#FEF2F2' },
-  2: { label:'Escalation Contact',  color:'#F59E0B', bg:'#FFFBEB' },
-  3: { label:'Final Escalation',    color:'#F97316', bg:'#FFF7ED' },
+  1: { label:'Subscriber 1', color:'#7C3AED', bg:'#F5F3FF' },
+  2: { label:'Subscriber 2', color:'#7C3AED', bg:'#F5F3FF' },
+  3: { label:'Subscriber 3', color:'#7C3AED', bg:'#F5F3FF' },
 }
 
 export default function SubscribersPage() {
@@ -79,7 +79,7 @@ export default function SubscribersPage() {
           </div>
           <div>
             <p className="text-sm font-bold text-gray-900">{subs.length} Subscriber{subs.length !== 1 ? 's' : ''}</p>
-            <p className="text-xs text-gray-500">Alert escalation chain</p>
+            <p className="text-xs text-gray-500">All subscribers notified simultaneously on breach</p>
           </div>
         </div>
         <button onClick={() => setShowForm(v => !v)} className="btn btn-primary">
@@ -109,12 +109,12 @@ export default function SubscribersPage() {
                 value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value}))} />
             </div>
             <div>
-              <label className="text-xs text-gray-500 mb-1 block font-medium">Escalation Order</label>
+              <label className="text-xs text-gray-500 mb-1 block font-medium">Notification Order</label>
               <select className="form-input" value={form.escalation_order}
                 onChange={e => setForm(f => ({...f, escalation_order: e.target.value}))}>
-                <option value={1}>1 — Primary</option>
-                <option value={2}>2 — Escalation 2</option>
-                <option value={3}>3 — Final</option>
+                <option value={1}>Subscriber 1</option>
+                <option value={2}>Subscriber 2</option>
+                <option value={3}>Subscriber 3</option>
               </select>
             </div>
             <div>
@@ -156,7 +156,7 @@ export default function SubscribersPage() {
                       className="inline-block mt-1 text-xs font-semibold px-2 py-0.5 rounded-full"
                       style={{ background: om.bg, color: om.color }}
                     >
-                      #{s.escalation_order} · {om.label}
+                      {om.label}
                     </span>
                   </div>
                   <div

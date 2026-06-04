@@ -9,7 +9,7 @@ import { nowIST } from '../../utils/time.js'
 
 const TITLES = {
   '/dashboard':   'Dashboard',
-  '/alerts':      'Alert Log',
+  '/alerts':      'Alert History',
   '/logs':        'Live Logs',
   '/history':     'Backup & History',
   '/reports':     'Daily Reports',
