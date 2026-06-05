@@ -229,3 +229,59 @@ async def test_email(body: _TestEmailIn):
             status_code=500,
             content={"status": "failed", "error": str(exc)},
         )
+
+
+# ─── Test SMS ─────────────────────────────────────────────────────────────────
+
+class _TestSmsIn(BaseModel):
+    phone: str
+
+
+@router.post(
+    "/admin/test-sms",
+    summary="Send a test SMS alert",
+    description=(
+        "Immediately sends a test SMS to the given phone number using dummy "
+        "low-temperature data (37.5°C below 38.0°C threshold). "
+        "Routes through the configured SMS_METHOD (adb / gammu / gateway). "
+        "Requires admin auth. Body: {\"phone\": \"6385936224\"}"
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def test_sms(body: _TestSmsIn):
+    """Send a test SMS to verify Module 3 (ADB/Gammu/Gateway transport)."""
+    from config import SMS_METHOD
+    from modules.sms.sender import build_sms_message, send_sms
+    try:
+        ts = now_iso()
+        message = build_sms_message(
+            value=37.5,
+            threshold=38.0,
+            direction="low",
+            timestamp_utc=ts,
+        )
+        ok = send_sms(body.phone, message)
+        if ok:
+            logger.info("Test SMS sent to %s via %s", body.phone, SMS_METHOD)
+            return {
+                "status":  "sent",
+                "phone":   body.phone,
+                "method":  SMS_METHOD,
+                "message": message,
+                "chars":   len(message),
+            }
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "failed",
+                "phone":  body.phone,
+                "method": SMS_METHOD,
+                "error":  "SMS transport returned False — check server logs for details",
+            },
+        )
+    except Exception as exc:
+        logger.error("test_sms failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": str(exc)},
+        )

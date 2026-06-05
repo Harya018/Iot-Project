@@ -3,7 +3,7 @@
  * Threshold config, demo controls (CSV playback), and admin info.
  */
 import { useState, useEffect, useCallback } from 'react'
-import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle } from 'lucide-react'
+import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone } from 'lucide-react'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
   simulateBreach, createBackup, fetchHealth,
@@ -62,6 +62,11 @@ export default function SettingsPage() {
   const [testEmailAddr,  setTestEmailAddr]  = useState('crharya@gmail.com')
   const [testingEmail,   setTestingEmail]   = useState(false)
   const [testEmailMsg,   setTestEmailMsg]   = useState(null)
+
+  // ── SMS test state ───────────────────────────────────────────────────────────────────
+  const [testSmsPhone,   setTestSmsPhone]   = useState('6385936224')
+  const [testingSms,     setTestingSms]     = useState(false)
+  const [testSmsMsg,     setTestSmsMsg]     = useState(null)
 
   // ── Load data ────────────────────────────────────────────────────────────────
   const loadThresholds = useCallback(async () => {
@@ -188,6 +193,38 @@ export default function SettingsPage() {
       setTestEmailMsg({ type: 'error', text: 'Failed: ' + err.message })
       addToast({ type: 'error', message: 'Email test error: ' + err.message })
     } finally { setTestingEmail(false) }
+  }
+
+  // ── Test SMS ───────────────────────────────────────────────────────────────────────
+  const handleTestSms = async () => {
+    if (!testSmsPhone.trim()) return
+    setTestingSms(true); setTestSmsMsg(null)
+    try {
+      const res = await fetch('/api/admin/test-sms', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Password': sessionStorage.getItem('adminPassword') || 'admin123',
+        },
+        body: JSON.stringify({ phone: testSmsPhone.trim() }),
+        credentials: 'include',
+      })
+      const data = await res.json()
+      if (res.ok && data.status === 'sent') {
+        setTestSmsMsg({
+          type: 'success',
+          text: `✅ SMS sent to ${data.phone} via ${data.method} (${data.chars} chars)`,
+        })
+        addToast({ type: 'success', message: `📱 Test SMS sent to ${data.phone} via ${data.method}` })
+      } else {
+        const err = data.error || data.detail || 'Unknown error'
+        setTestSmsMsg({ type: 'error', text: `Failed: ${err}` })
+        addToast({ type: 'error', message: `SMS failed: ${err}` })
+      }
+    } catch (err) {
+      setTestSmsMsg({ type: 'error', text: 'Failed: ' + err.message })
+      addToast({ type: 'error', message: 'SMS test error: ' + err.message })
+    } finally { setTestingSms(false) }
   }
 
   const isOverride = threshData?.source === 'runtime_override'
@@ -453,7 +490,102 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* ── Section 4: Admin Info ───────────────────────────────────────── */}
+        {/* ── Section 4: SMS Configuration ─────────────────────────────── */}
+        <Section title="SMS Configuration" icon={MessageSquare}>
+          <div className="space-y-4">
+
+            {/* Method + Status */}
+            <div className="flex items-center justify-between py-2 border-b border-gray-100">
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <Smartphone size={13} />
+                <span className="font-medium">SMS Method</span>
+              </div>
+              <span className="text-xs font-semibold text-gray-700 uppercase">
+                {health?.sms_method || 'adb'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between py-2 border-b border-gray-100">
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <CheckCircle size={13} />
+                <span className="font-medium">SMS Status</span>
+              </div>
+              <span className={`text-xs font-semibold ${
+                (health?.modules?.sms || '').startsWith('ok') ? 'text-emerald-600' :
+                (health?.modules?.sms || '').startsWith('error') ? 'text-red-500' :
+                'text-amber-600'
+              }`}>
+                {(health?.modules?.sms || '').startsWith('ok')
+                  ? `✓ ${health.modules.sms}`
+                  : (health?.modules?.sms || '').startsWith('error')
+                  ? `⚠ ${health.modules.sms}`
+                  : '⚠ Not yet tested'}
+              </span>
+            </div>
+
+            {/* Context info box — changes based on method */}
+            {health?.sms_method === 'adb' || !health?.sms_method ? (
+              <div className="rounded-xl bg-blue-50 border border-blue-200 px-4 py-3">
+                <p className="text-xs font-semibold text-blue-800 mb-1">📱 ADB Mode (USB Android Phone)</p>
+                <p className="text-xs text-blue-700 leading-relaxed">
+                  Phone must be connected via <strong>USB</strong> with{' '}
+                  <strong>USB debugging enabled</strong> in Developer Options.
+                  Run <code className="bg-blue-100 px-1 rounded">adb devices</code> to confirm it shows as <em>device</em>.
+                </p>
+              </div>
+            ) : health?.sms_method === 'gammu' ? (
+              <div className="rounded-xl bg-purple-50 border border-purple-200 px-4 py-3">
+                <p className="text-xs font-semibold text-purple-800 mb-1">📻 Gammu Mode (USB GSM Modem)</p>
+                <p className="text-xs text-purple-700 leading-relaxed">
+                  USB GSM modem must be connected to port{' '}
+                  <code className="bg-purple-100 px-1 rounded">{health?.modules?.sms?.includes('COM') ? health.modules.sms : 'COM3'}</code>.
+                  Install driver and run: <code className="bg-purple-100 px-1 rounded">pip install python-gammu</code>.
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-xl bg-gray-50 border border-gray-200 px-4 py-3">
+                <p className="text-xs font-semibold text-gray-700 mb-1">🌐 Gateway Mode (LAN Android App)</p>
+                <p className="text-xs text-gray-600 leading-relaxed">
+                  Android SMS Gateway app must be running on same Wi-Fi network.
+                  Configure <code className="bg-gray-100 px-1 rounded">SMS_GATEWAY_URL</code> in .env.
+                </p>
+              </div>
+            )}
+
+            {/* Test SMS form */}
+            <div className="rounded-xl bg-green-50 border border-green-200 p-4 space-y-3">
+              <p className="text-xs font-semibold text-green-800">
+                📱 Send Test SMS
+              </p>
+              <p className="text-xs text-green-700 leading-relaxed">
+                Sends a test SMS immediately using dummy data (37.5°C, below 38°C threshold).
+                Routes through <strong>{health?.sms_method || 'adb'}</strong> method.
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="tel"
+                  value={testSmsPhone}
+                  onChange={e => setTestSmsPhone(e.target.value)}
+                  placeholder="Phone number (e.g. 6385936224)"
+                  className="form-input flex-1 text-xs"
+                />
+                <button
+                  onClick={handleTestSms}
+                  disabled={testingSms || !testSmsPhone.trim()}
+                  className="btn btn-sm flex-shrink-0 flex items-center gap-1.5"
+                  style={{ background: '#16A34A', color: '#fff', border: 'none' }}
+                >
+                  {testingSms
+                    ? <><RefreshCw size={13} className="animate-spin" /> Sending…</>
+                    : <><MessageSquare size={13} /> Send Test SMS</>
+                  }
+                </button>
+              </div>
+              <StatusMsg msg={testSmsMsg} />
+            </div>
+          </div>
+        </Section>
+
+        {/* ── Section 5: Admin Info ───────────────────────────────────────── */}
         <Section title="Admin Info" icon={Info}>
           <div className="space-y-3">
             {[

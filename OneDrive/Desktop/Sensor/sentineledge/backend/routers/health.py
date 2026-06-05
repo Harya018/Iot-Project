@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter
 
 import database
-from config import MODULE_STATUS, APP_ENV, APP_VERSION
+from config import MODULE_STATUS, APP_ENV, APP_VERSION, SMS_METHOD, SMTP_USER
 from modules.inapp.manager import active_connections
 
 router = APIRouter(prefix="/api")
@@ -71,6 +71,12 @@ async def health():
         modules["websocket"] = f"ok -- {connected} client(s) connected"
         MODULE_STATUS["websocket"] = "ok"
 
+    # Enrich SMS status with method label when not already set by transport
+    sms_status = modules.get("sms", "not_built")
+    if sms_status in ("not_built", "starting", "", None):
+        modules["sms"] = "not_configured"
+    # If it's already set to ok/error by the transport, leave it as-is
+
     # Alerts today
     try:
         alerts_today = database.get_alerts_today_count()
@@ -94,4 +100,6 @@ async def health():
         "alerts_today": alerts_today,
         "last_reading": last_reading if last_reading else None,
         "delivery_stats_today": delivery_stats,
+        "smtp_user": SMTP_USER,
+        "sms_method": SMS_METHOD,
     }

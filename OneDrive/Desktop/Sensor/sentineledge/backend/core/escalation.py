@@ -27,7 +27,7 @@ from typing import Optional
 import database
 from modules.email.smtp import send_alert_email_async
 from modules.email.smtp import send_email_async  # kept for daily reports / legacy
-from modules.sms.gateway import send_sms_async
+from modules.sms.sender import send_alert_sms_async
 from modules.inapp.broadcaster import send_push_async
 from utils.formatter import format_alert_message   # used by _build_message (SMS body)
 from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS
@@ -95,11 +95,18 @@ async def _notify_subscriber(
                 subscriber["email"], sub_id,
             )
 
-    # ── Channel 2: SMS ────────────────────────────────────────────────────────
+    # ── Channel 2: SMS ───────────────────────────────────────────────────────────
     async def _sms() -> None:
         err: Optional[str] = None
         try:
-            ok = await send_sms_async(subscriber["phone"], message)
+            meta = alert_meta or {}
+            ok = await send_alert_sms_async(
+                phone=subscriber["phone"],
+                value=float(meta.get("value", 0.0)),
+                threshold=float(meta.get("threshold", 0.0)),
+                direction=str(meta.get("direction", "high")),
+                timestamp_utc=str(meta.get("timestamp", "") or ""),
+            )
         except Exception as exc:
             ok = False
             err = str(exc)

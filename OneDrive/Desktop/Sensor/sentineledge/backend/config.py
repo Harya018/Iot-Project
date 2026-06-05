@@ -37,6 +37,15 @@ SMS_GATEWAY_URL: str = os.getenv("SMS_GATEWAY_URL", "http://192.168.1.100:8080")
 SMS_GATEWAY_USER: str = os.getenv("SMS_GATEWAY_USER", "admin")
 SMS_GATEWAY_PASS: str = os.getenv("SMS_GATEWAY_PASS", "password")
 
+# ── SMS Transport Method ───────────────────────────────────────────────────────
+# "adb"   — Android phone via USB (demo / development)
+# "gammu" — USB GSM modem/dongle (production)
+# "gateway" — Original Android SMS Gateway REST API
+SMS_METHOD: str      = os.getenv("SMS_METHOD", "adb")
+SMS_ADB_SERIAL: str  = os.getenv("SMS_ADB_SERIAL", "")        # e.g. "emulator-5554" or ""
+SMS_GAMMU_PORT: str  = os.getenv("SMS_GAMMU_PORT", "COM3")    # Windows: COM3, Linux: /dev/ttyUSB0
+SMS_GAMMU_BAUD: int  = int(os.getenv("SMS_GAMMU_BAUD", "9600"))
+
 # ── Escalation / Cooldown ─────────────────────────────────────────────────────
 ESCALATION_TIMEOUT_SECONDS: int = int(os.getenv("ESCALATION_TIMEOUT_SECONDS", "60"))
 DEMO_ESCALATION_TIMEOUT: int     = int(os.getenv("DEMO_ESCALATION_TIMEOUT", "15"))
