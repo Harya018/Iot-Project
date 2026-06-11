@@ -57,7 +57,7 @@ class SubscriberIn(BaseModel):
     name: str
     phone: str
     email: EmailStr
-    escalation_order: int = Field(ge=1, le=3)
+    escalation_order: int = Field(ge=1, le=9999)
     pin: Optional[str] = None  # if provided: 4-6 digits, stored as SHA-256 hash
 
     @field_validator("name")
@@ -78,13 +78,6 @@ class SubscriberIn(BaseModel):
             raise ValueError(
                 "phone must be 10-15 digits, optionally prefixed with +"
             )
-        return v
-
-    @field_validator("escalation_order")
-    @classmethod
-    def validate_escalation_order(cls, v: int) -> int:
-        if v not in (1, 2, 3):
-            raise ValueError("escalation_order must be 1, 2, or 3")
         return v
 
     @field_validator("pin")

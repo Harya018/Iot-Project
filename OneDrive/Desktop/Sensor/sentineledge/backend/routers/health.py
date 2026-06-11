@@ -1,17 +1,20 @@
 """
-routers/health.py — /api/health endpoint (Addition 5).
+routers/health.py — /api/health endpoint.
 
 Returns comprehensive system health including module statuses,
 uptime, connected clients, alert count, last reading, and delivery stats.
+
+Rate limiting (slowapi): 120/minute per IP (mobile app polls frequently).
 """
 
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 import database
 from config import MODULE_STATUS, APP_ENV, APP_VERSION, SMS_METHOD, SMTP_USER
+from middleware.rate_limit import limiter
 from modules.inapp.manager import active_connections
 
 router = APIRouter(prefix="/api")
@@ -59,10 +62,9 @@ def _overall_status() -> str:
 
 
 @router.get("/health")
-async def health():
-    """
-    Full system health check (Addition 5).
-    """
+@limiter.limit("120/minute")
+async def health(request: Request):
+    """Full system health check."""
     connected = len(active_connections)
 
     # Build module status dict with websocket client count
@@ -71,11 +73,17 @@ async def health():
         modules["websocket"] = f"ok -- {connected} client(s) connected"
         MODULE_STATUS["websocket"] = "ok"
 
+    # Email module status
+    from config import SMTP_HOST
+    if SMTP_HOST and SMTP_USER:
+        modules["email"] = "ok -- Configured"
+    else:
+        modules["email"] = "warning -- Not configured"
+
     # Enrich SMS status with method label when not already set by transport
     sms_status = modules.get("sms", "not_built")
     if sms_status in ("not_built", "starting", "", None):
         modules["sms"] = "not_configured"
-    # If it's already set to ok/error by the transport, leave it as-is
 
     # Alerts today
     try:
@@ -89,17 +97,29 @@ async def health():
     except Exception:
         delivery_stats = {}
 
+    # GSM modem status (gammu mode only)
+    try:
+        from modules.sms.sender import _mock_mode as gsm_mock, _modem_port as gsm_port
+        gsm_modem_info = {
+            "connected": not gsm_mock,
+            "port":      gsm_port if gsm_port else "not detected",
+            "mode":      "live" if not gsm_mock else "mock",
+        }
+    except Exception:
+        gsm_modem_info = {"connected": False, "port": "unknown", "mode": "mock"}
+
     return {
-        "status": _overall_status(),
-        "version": APP_VERSION,
-        "environment": APP_ENV,
-        "uptime": _format_uptime(),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "modules": modules,
-        "connected_clients": connected,
-        "alerts_today": alerts_today,
-        "last_reading": last_reading if last_reading else None,
+        "status":               _overall_status(),
+        "version":              APP_VERSION,
+        "environment":          APP_ENV,
+        "uptime":               _format_uptime(),
+        "timestamp":            datetime.now(timezone.utc).isoformat(),
+        "modules":              modules,
+        "connected_clients":    connected,
+        "alerts_today":         alerts_today,
+        "last_reading":         last_reading if last_reading else None,
         "delivery_stats_today": delivery_stats,
-        "smtp_user": SMTP_USER,
-        "sms_method": SMS_METHOD,
+        "smtp_user":            SMTP_USER,
+        "sms_method":           SMS_METHOD,
+        "gsm_modem":            gsm_modem_info,
     }

@@ -15,6 +15,13 @@ ACKNOWLEDGE: Admin can manually mark alerts as seen from the dashboard.
 The system never calls acknowledge automatically.
 
 DELIVERY RECEIPTS: Logged per alert per subscriber per channel.
+
+PARALLEL ARCHITECTURE (post-upgrade):
+- Email:  ThreadPoolExecutor(max_workers=20) — each subscriber gets their
+          own SMTP connection; all emails fire simultaneously.
+- SMS:    GSM dongle → single queue worker (hardware constraint, one COM port);
+          ADB/gateway → asyncio.gather() concurrently.
+- Email batch and SMS batch run in parallel via asyncio.gather().
 """
 
 from __future__ import annotations
@@ -25,9 +32,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import database
-from modules.email.smtp import send_alert_email_async
+from modules.email.smtp import send_alert_email_async, send_alert_email_to_all
 from modules.email.smtp import send_email_async  # kept for daily reports / legacy
-from modules.sms.sender import send_alert_sms_async
+from modules.sms.sender import send_alert_sms_async, send_sms_to_all
 from modules.inapp.broadcaster import send_push_async
 from utils.formatter import format_alert_message   # used by _build_message (SMS body)
 from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS
@@ -156,33 +163,126 @@ async def _notify_all_subscribers(
     direction: str,
 ) -> None:
     """
-    Build the alert message and fire all channels to every
-    active subscriber simultaneously. Always fires at level 1.
+    Deliver alerts to every active subscriber simultaneously.
+
+    Architecture (parallel):
+    ─────────────────────────────────────────────────────────────────
+    1. Email batch   — all emails fired at once via ThreadPoolExecutor
+                       (up to 20 parallel SMTP connections)
+    2. SMS batch     — all SMS queued simultaneously:
+                       • gammu: single queue worker (serial port constraint)
+                       • adb/gateway: asyncio.gather() concurrently
+    3. In-app push   — per-subscriber WebSocket push, gathered concurrently
+    4. Channels 1+2 run in parallel via asyncio.gather(email, sms)
+    ─────────────────────────────────────────────────────────────────
+    Always fires at escalation level 1. Receipts logged for every channel.
     """
-    # Fetch alert metadata for the HTML email builder
     alert_meta = database.get_alert(alert_id) or {}
     severity   = alert_meta.get("severity", "WARNING")
+    timestamp_utc = str(alert_meta.get("timestamp", "") or "")
 
-    message     = _build_message(parameter, value, threshold, direction, severity)
     subscribers = database.get_subscribers_ordered()
-    active_subs = [s for s in subscribers if s.get("active", True)]
+    active_subs = [s for s in subscribers if s.get("is_active", s.get("active", True))]
 
     if not active_subs:
-        logger.warning(
-            "No active subscribers to notify for alert %d", alert_id
-        )
+        logger.warning("No active subscribers to notify for alert %d", alert_id)
         return
 
-    # Always set escalation_level = 1
     database.update_escalation_level(alert_id, 1)
+    level = 1
 
-    tasks = [
-        _notify_subscriber(alert_id, sub, message, alert_meta)
-        for sub in active_subs
-    ]
-    await asyncio.gather(*tasks, return_exceptions=True)
     logger.info(
-        "Alert notifications complete for alert %d — %d subscriber(s) notified",
+        "Parallel alert delivery: %d active subscriber(s) → alert %d",
+        len(active_subs), alert_id,
+    )
+
+    # ── Channel 1 (Batch): HTML Email to ALL subscribers simultaneously ────────
+    async def _email_batch() -> None:
+        try:
+            results = await send_alert_email_to_all(
+                subscribers=active_subs,
+                value=value,
+                threshold=threshold,
+                direction=direction,
+                severity=severity,
+                timestamp_utc=timestamp_utc,
+            )
+            # Log receipts for each subscriber
+            for sub, res in zip(active_subs, results):
+                ok  = res.get("status") == "sent"
+                err = res.get("error")
+                database.log_escalation(alert_id, level, sub["id"], "email", ok)
+                database.insert_receipt(alert_id, "email", sub["id"], level, ok, err)
+                if not ok:
+                    logger.warning(
+                        "Email to %s (sub %d) failed: %s",
+                        sub["email"], sub["id"], err,
+                    )
+        except Exception as exc:
+            logger.error("Email batch failed for alert %d: %s", alert_id, exc)
+            for sub in active_subs:
+                database.log_escalation(alert_id, level, sub["id"], "email", False)
+                database.insert_receipt(alert_id, "email", sub["id"], level, False, str(exc))
+
+    # ── Channel 2 (Batch): SMS to ALL subscribers simultaneously ──────────────
+    async def _sms_batch() -> None:
+        try:
+            results = await send_sms_to_all(
+                subscribers=active_subs,
+                value=value,
+                threshold=threshold,
+                direction=direction,
+                timestamp_utc=timestamp_utc,
+            )
+            # Log receipts for each subscriber
+            for sub, res in zip(active_subs, results):
+                ok  = res.get("status") in ("sent", "queued")
+                err = res.get("error")
+                database.log_escalation(alert_id, level, sub["id"], "sms", ok)
+                database.insert_receipt(alert_id, "sms", sub["id"], level, ok, err)
+                if not ok:
+                    logger.warning(
+                        "SMS to %s (sub %d) failed: %s",
+                        sub["phone"], sub["id"], err,
+                    )
+        except Exception as exc:
+            logger.error("SMS batch failed for alert %d: %s", alert_id, exc)
+            for sub in active_subs:
+                database.log_escalation(alert_id, level, sub["id"], "sms", False)
+                database.insert_receipt(alert_id, "sms", sub["id"], level, False, str(exc))
+
+    # ── Channel 3 (Per-subscriber): In-App WebSocket push ─────────────────────
+    message = _build_message(parameter, value, threshold, direction, severity)
+
+    async def _push_one(sub: dict) -> None:
+        push_sub = sub.get("push_subscription")
+        sub_id   = sub["id"]
+        if not push_sub:
+            database.insert_receipt(alert_id, "inapp", sub_id, level, False, "no active connection")
+            return
+        err: Optional[str] = None
+        try:
+            ok = await send_push_async(push_sub, "SentinelEdge Alert", message, {"alert_id": alert_id})
+        except Exception as exc:
+            ok  = False
+            err = str(exc)
+        database.log_escalation(alert_id, level, sub_id, "inapp", ok)
+        database.insert_receipt(alert_id, "inapp", sub_id, level, ok, err)
+        if not ok:
+            logger.warning("In-app push to sub %d failed", sub_id)
+
+    push_tasks = [_push_one(sub) for sub in active_subs]
+
+    # ── Fire email batch, SMS batch, and all WebSocket pushes simultaneously ──
+    await asyncio.gather(
+        _email_batch(),
+        _sms_batch(),
+        *push_tasks,
+        return_exceptions=True,
+    )
+
+    logger.info(
+        "Parallel alert delivery complete for alert %d — %d subscriber(s) notified",
         alert_id, len(active_subs),
     )
 
@@ -244,14 +344,59 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
 async def acknowledge(alert_id: int, acknowledged_by: str) -> bool:
     """
     Mark an alert as seen (optional, manual action from dashboard).
-    The system never calls this automatically.
+    Broadcasts an 'acknowledgement' WebSocket event so dashboards update live.
     """
+    from datetime import datetime, timezone
+
     ok = database.acknowledge_alert(alert_id, acknowledged_by)
     if ok:
         logger.info("Alert %d marked as seen by '%s'.", alert_id, acknowledged_by)
+        # Fetch the updated alert to compute response_time_seconds
+        alert = database.get_alert(alert_id)
+        response_time: int | None = None
+        if alert and alert.get("acknowledged_at") and alert.get("timestamp"):
+            try:
+                fmt = "%Y-%m-%dT%H:%M:%S.%f+00:00"
+                # Try multiple ISO formats
+                def _parse(s: str) -> datetime:
+                    for fmt in (
+                        "%Y-%m-%dT%H:%M:%S.%f+00:00",
+                        "%Y-%m-%dT%H:%M:%S+00:00",
+                        "%Y-%m-%dT%H:%M:%S.%fZ",
+                        "%Y-%m-%dT%H:%M:%SZ",
+                        "%Y-%m-%dT%H:%M:%S.%f",
+                        "%Y-%m-%dT%H:%M:%S",
+                    ):
+                        try:
+                            return datetime.strptime(s, fmt)
+                        except ValueError:
+                            continue
+                    raise ValueError(f"Cannot parse datetime: {s}")
+
+                ack_time   = _parse(alert["acknowledged_at"])
+                alert_time = _parse(alert["timestamp"])
+                response_time = max(0, int((ack_time - alert_time).total_seconds()))
+            except Exception as exc:
+                logger.warning("Could not compute response_time_seconds: %s", exc)
+
+        # Broadcast to all connected WebSocket clients
+        try:
+            from modules.inapp.manager import broadcast as _broadcast
+            await _broadcast({
+                "type":                "acknowledgement",
+                "alert_id":            alert_id,
+                "acknowledged_by":     acknowledged_by,
+                "acknowledged_at":     alert.get("acknowledged_at") if alert else None,
+                "alert_timestamp":     alert.get("timestamp") if alert else None,
+                "alert_value":         alert.get("value") if alert else None,
+                "response_time_seconds": response_time,
+            })
+        except Exception as exc:
+            logger.warning("Ack broadcast failed: %s", exc)
     else:
         logger.error("Failed to mark alert %d as seen.", alert_id)
     return ok
+
 
 
 async def resume_pending_escalations() -> None:

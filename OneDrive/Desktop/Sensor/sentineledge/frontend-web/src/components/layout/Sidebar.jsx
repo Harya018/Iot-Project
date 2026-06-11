@@ -7,7 +7,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Bell, Terminal, Archive, BarChart2,
   Receipt, Monitor, Users, Settings, Activity,
-  ClipboardList, Thermometer, LogOut,
+  ClipboardList, Thermometer, LogOut, CheckCheck, UserCircle2, ShieldCheck,
 } from 'lucide-react'
 
 const NAV = [
@@ -22,6 +22,9 @@ const NAV = [
   { to: '/settings',    icon: Settings,        label: 'Settings'      },
   { to: '/health',      icon: Activity,        label: 'Health'        },
   { to: '/events',      icon: ClipboardList,   label: 'Audit Trail'   },
+  { to: '/ack-log',     icon: CheckCheck,      label: 'Ack Log'       },
+  { to: '/profile',        icon: UserCircle2,  label: 'Admin Profile' },
+  { to: '/manage-admins',  icon: ShieldCheck,  label: 'Manage Admins' },
 ]
 
 export default function Sidebar({ unreadCount }) {

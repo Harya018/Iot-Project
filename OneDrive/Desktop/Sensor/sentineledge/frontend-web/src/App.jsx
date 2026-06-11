@@ -26,6 +26,9 @@ import SubscribersPage from './pages/SubscribersPage.jsx'
 import SettingsPage    from './pages/SettingsPage.jsx'
 import HealthPage      from './pages/HealthPage.jsx'
 import EventsPage      from './pages/EventsPage.jsx'
+import AckLogPage      from './pages/AckLogPage.jsx'
+import AdminProfilePage from './pages/AdminProfilePage.jsx'
+import ManageAdminsPage from './pages/ManageAdminsPage.jsx'
 
 // ── Shell wraps a single page in Layout + optional alarm banner ───────────────
 // Each protected route renders its own Shell so the page component
@@ -138,6 +141,9 @@ export default function App() {
         <Route path="/settings"    element={protect(<SettingsPage />)} />
         <Route path="/health"      element={protect(<HealthPage />)} />
         <Route path="/events"      element={protect(<EventsPage />)} />
+        <Route path="/ack-log"     element={protect(<AckLogPage wsData={wsData} />)} />
+        <Route path="/profile"        element={protect(<AdminProfilePage />)} />
+        <Route path="/manage-admins"   element={protect(<ManageAdminsPage />)} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

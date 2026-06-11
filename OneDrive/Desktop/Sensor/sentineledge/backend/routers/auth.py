@@ -8,27 +8,32 @@ Clients (React Native) store the token in AsyncStorage and re-login on restart.
 Endpoints
 ---------
 POST /api/auth/login    — public; returns a 64-char hex token (30-day TTL)
+                          Rate limited: 10/minute per IP (brute-force protection)
 POST /api/auth/logout   — requires X-Auth-Token header
 GET  /api/auth/me       — requires X-Auth-Token header
+POST /api/auth/admin-login  — sub-admin/admin dashboard login (uses DB sessions)
+GET  /api/auth/admin-me     — returns current admin session info
 """
 
-from __future__ import annotations
+
 
 import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
+from pydantic import BaseModel
 
 import database
 from models import LoginIn, LoginOut
+from middleware.rate_limit import limiter
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
-# ── In-memory token store ─────────────────────────────────────────────────────
+# ── In-memory subscriber token store ─────────────────────────────────────────
 # Key: token (64-char hex string)
 # Value: {"subscriber_id": int, "name": str, "escalation_order": int,
 #         "expires_at": datetime}
@@ -62,9 +67,10 @@ def _get_valid_token(x_auth_token: str | None) -> dict[str, Any]:
     "/login",
     response_model=LoginOut,
     summary="Subscriber login",
-    description="Authenticate with name + PIN. Returns a 30-day bearer token.",
+    description="Authenticate with name + PIN. Returns a 30-day bearer token. Rate limited: 10/min.",
 )
-async def login(body: LoginIn) -> LoginOut:
+@limiter.limit("10/minute")
+async def login(body: LoginIn, request: Request) -> LoginOut:
     subscriber = database.get_subscriber_by_name_and_pin(body.name, body.pin)
     if subscriber is None:
         logger.warning("Failed login attempt for name=%r", body.name)
@@ -114,4 +120,69 @@ async def me(x_auth_token: str = Header(default=None)):
         "name":             payload["name"],
         "escalation_order": payload["escalation_order"],
         "expires_at":       payload["expires_at"].isoformat(),
+    }
+
+
+# ── Sub-admin session login (DB-backed) ───────────────────────────────────────
+# Sub-admins log in with name+password (stored in the admins table).
+# Sessions are stored in admin_sessions PostgreSQL table and survive restarts.
+# Session TTL: 8 hours.
+
+class _AdminLoginIn(BaseModel):
+    name: str
+    password: str
+
+
+@router.post(
+    "/admin-login",
+    summary="Sub-admin / Admin dashboard login",
+    description=(
+        "Authenticate a dashboard user (main admin or sub-admin) with "
+        "name + password. Returns role so the client can route to the "
+        "correct dashboard. Session TTL: 8 hours. Session persists across restarts."
+    ),
+)
+async def admin_login(body: _AdminLoginIn):
+    """Login for the admin dashboard (main or sub-admin)."""
+    admin = database.verify_admin_password(body.name, body.password)
+    if admin is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "InvalidCredentials", "message": "Name or password is incorrect"},
+        )
+    token = secrets.token_hex(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
+
+    # Persist session in PostgreSQL
+    database.create_session(token, expires_at)
+
+    logger.info("Admin login: name=%r role=%s", admin["name"], admin["role"])
+    return {
+        "token":    token,
+        "admin_id": admin["id"],
+        "name":     admin["name"],
+        "role":     admin["role"],
+        "message":  "Login successful",
+    }
+
+
+@router.get(
+    "/admin-me",
+    summary="Current admin session info",
+    description="Returns session info for the given admin token (X-Admin-Token header).",
+)
+async def admin_me(x_admin_token: str = Header(default=None)):
+    """Return the current sub-admin session info."""
+    if not x_admin_token:
+        raise HTTPException(status_code=401, detail="Missing X-Admin-Token")
+
+    session = database.get_session(x_admin_token)
+    if session is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired X-Admin-Token")
+
+    return {
+        "token":       x_admin_token,
+        "created_at":  session["created_at"].isoformat() if session.get("created_at") else None,
+        "expires_at":  session["expires_at"].isoformat() if session.get("expires_at") else None,
+        "last_used_at": session["last_used_at"].isoformat() if session.get("last_used_at") else None,
     }

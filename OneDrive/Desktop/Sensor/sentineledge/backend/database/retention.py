@@ -1,32 +1,34 @@
 """
 database/retention.py — Automatic data retention cleanup for SentinelEdge.
 
-Prevents the SQLite database from growing unboundedly by deleting old rows.
-Runs daily at 2:00 AM UTC. Alerts are kept forever.
+Prevents the PostgreSQL database from growing unboundedly by deleting old rows.
+Runs daily at 2:00 AM UTC.
 
 Retention policy:
-    readings       → 30 days
-    escalation_log → 90 days
+    readings          → 30 days
+    escalation_log    → 90 days
     delivery_receipts → 90 days
 
 Alerts and config_changes are kept forever (audit trail).
+
+PostgreSQL: datetime() / strftime() replaced with NOW() - INTERVAL '...'.
+Database size uses pg_database_size() instead of file stat.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sqlite3
+import os
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
 from utils.logger import get_logger
 from utils.time import now_iso
 
 logger = get_logger(__name__)
 
-RETENTION_DAYS_READINGS = 30
+RETENTION_DAYS_READINGS       = 30
 RETENTION_DAYS_ESCALATION_LOG = 90
-RETENTION_DAYS_RECEIPTS = 90
+RETENTION_DAYS_RECEIPTS       = 90
 
 
 # ── Core cleanup ──────────────────────────────────────────────────────────────
@@ -37,17 +39,14 @@ def cleanup_old_readings() -> None:
     than their respective retention windows.
 
     Alerts and config_changes are never deleted.
+    PostgreSQL: uses NOW() - INTERVAL '...' for date arithmetic.
     """
-    from database.connection import get_connection, execute_write
-
-    now = datetime.now(timezone.utc)
-    cutoff_readings = (now - timedelta(days=RETENTION_DAYS_READINGS)).isoformat()
-    cutoff_esc      = (now - timedelta(days=RETENTION_DAYS_ESCALATION_LOG)).isoformat()
+    from database.connection import execute_write
 
     try:
         cur = execute_write(
-            "DELETE FROM readings WHERE timestamp < ?",
-            (cutoff_readings,),
+            "DELETE FROM readings WHERE timestamp::TIMESTAMPTZ < NOW() - INTERVAL %s",
+            (f"{RETENTION_DAYS_READINGS} days",),
         )
         deleted_readings = cur.rowcount
         logger.info(
@@ -59,8 +58,8 @@ def cleanup_old_readings() -> None:
 
     try:
         cur = execute_write(
-            "DELETE FROM escalation_log WHERE sent_at < ?",
-            (cutoff_esc,),
+            "DELETE FROM escalation_log WHERE sent_at::TIMESTAMPTZ < NOW() - INTERVAL %s",
+            (f"{RETENTION_DAYS_ESCALATION_LOG} days",),
         )
         logger.info(
             "Retention: deleted %d escalation_log rows older than %d days.",
@@ -71,8 +70,8 @@ def cleanup_old_readings() -> None:
 
     try:
         cur = execute_write(
-            "DELETE FROM delivery_receipts WHERE sent_at < ?",
-            (cutoff_esc,),
+            "DELETE FROM delivery_receipts WHERE sent_at::TIMESTAMPTZ < NOW() - INTERVAL %s",
+            (f"{RETENTION_DAYS_RECEIPTS} days",),
         )
         logger.info(
             "Retention: deleted %d delivery_receipts rows older than %d days.",
@@ -91,12 +90,14 @@ def get_database_stats() -> dict:
         database_size_mb, backups_available
     """
     from database.connection import execute_read
-    from database.backup import get_backup_list, _DB_PATH as db_path
+    from database.backup import get_backup_list
+
+    db_name = os.getenv("DATABASE_URL", "sentineledge").split("/")[-1].split("?")[0]
 
     stats: dict = {
-        "readings_count": 0,
-        "oldest_reading": None,
-        "alerts_count": 0,
+        "readings_count":  0,
+        "oldest_reading":  None,
+        "alerts_count":    0,
         "database_size_mb": 0.0,
         "backups_available": 0,
     }
@@ -122,10 +123,10 @@ def get_database_stats() -> dict:
         logger.error("stats: alerts_count failed: %s", exc)
 
     try:
-        if Path(db_path).exists():
-            stats["database_size_mb"] = round(
-                Path(db_path).stat().st_size / (1024 * 1024), 2
-            )
+        rows = execute_read(
+            "SELECT ROUND(pg_database_size(current_database()) / 1048576.0, 2) AS size_mb"
+        )
+        stats["database_size_mb"] = float(rows[0]["size_mb"]) if rows else 0.0
     except Exception as exc:
         logger.error("stats: database_size_mb failed: %s", exc)
 
@@ -146,15 +147,12 @@ async def schedule_retention_cleanup() -> None:
     """
     logger.info("Retention scheduler started.")
     while True:
-        # Wait until 2 AM UTC
-        now = datetime.now(timezone.utc)
+        now    = datetime.now(timezone.utc)
         target = now.replace(hour=2, minute=0, second=0, microsecond=0)
         if now >= target:
             target += timedelta(days=1)
         wait = (target - now).total_seconds()
-        logger.info(
-            "Next retention cleanup in %.0f seconds (at 02:00 UTC).", wait
-        )
+        logger.info("Next retention cleanup in %.0f seconds (at 02:00 UTC).", wait)
         await asyncio.sleep(wait)
         logger.info("Running retention cleanup...")
         try:

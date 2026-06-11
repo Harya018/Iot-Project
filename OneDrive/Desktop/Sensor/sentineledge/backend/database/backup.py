@@ -1,62 +1,119 @@
-"""
-database/backup.py — Daily database backup for SentinelEdge.
+r"""
+database/backup.py — Daily database backup for SentinelEdge (PostgreSQL).
 
-Creates a timestamped copy of sentineledge.db in database/backups/.
+Creates a pg_dump .sql file in database/backups/ at UTC midnight.
 Keeps only the last MAX_BACKUPS files. Runs at UTC midnight every day.
 
-Never raises — all errors are logged and silently swallowed so
-a backup failure never crashes the server.
+pg_dump is available on PATH after the PostgreSQL Windows installer runs
+(default install adds C:\Program Files\PostgreSQL\<version>\bin to PATH).
+
+Never raises — all errors are logged and silently swallowed so a backup
+failure never crashes the server.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import shutil
+import subprocess
+import urllib.parse
 from pathlib import Path
 
 from utils.logger import get_logger
-from utils.time import now_iso, today_date_str, seconds_until_midnight
+from utils.time import now_iso, seconds_until_midnight
 
 logger = get_logger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-# database/backup.py → ../../database/
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_DB_PATH = _PROJECT_ROOT / "database" / "sentineledge.db"
-_BACKUP_DIR = _PROJECT_ROOT / "database" / "backups"
+_BACKUP_DIR   = _PROJECT_ROOT / "database" / "backups"
 
 MAX_BACKUPS = 7
+
+# ── Parse DATABASE_URL for pg_dump ────────────────────────────────────────────
+
+def _parse_db_url() -> dict:
+    """
+    Parse DATABASE_URL environment variable into components for pg_dump.
+    Returns dict with keys: host, port, dbname, user, password.
+    """
+    url = os.getenv(
+        "DATABASE_URL",
+        "postgresql://sentineledge:sentineledge123@localhost:5432/sentineledge",
+    )
+    parsed = urllib.parse.urlparse(url)
+    return {
+        "host":     parsed.hostname or "localhost",
+        "port":     str(parsed.port or 5432),
+        "dbname":   parsed.path.lstrip("/") or "sentineledge",
+        "user":     parsed.username or "sentineledge",
+        "password": parsed.password or "",
+    }
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
 
 def create_backup() -> str | None:
     """
-    Create a timestamped copy of sentineledge.db in database/backups/.
+    Create a pg_dump .sql backup of the PostgreSQL database.
 
     Returns the backup file path on success, None on failure.
     Deletes oldest backups beyond MAX_BACKUPS.
     """
     try:
-        if not _DB_PATH.exists():
-            logger.warning("Backup skipped: database file not found at %s", _DB_PATH)
-            return None
-
         _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Build filename: sentineledge_2026-06-02T10-45-00.db
+        # Build filename: sentineledge_2026-06-02T10-45-00.sql
         ts = now_iso().replace(":", "-").replace("+", "Z").split(".")[0]
-        backup_name = f"sentineledge_{ts}.db"
+        backup_name = f"sentineledge_{ts}.sql"
         backup_path = _BACKUP_DIR / backup_name
 
-        shutil.copy2(_DB_PATH, backup_path)
-        size_mb = round(backup_path.stat().st_size / (1024 * 1024), 2)
-        logger.info("Backup created: %s (%.2f MB)", backup_name, size_mb)
+        db = _parse_db_url()
+
+        env = os.environ.copy()
+        env["PGPASSWORD"] = db["password"]
+
+        cmd = [
+            "pg_dump",
+            "-h", db["host"],
+            "-p", db["port"],
+            "-U", db["user"],
+            "-d", db["dbname"],
+            "-F", "p",          # plain SQL format
+            "-f", str(backup_path),
+        ]
+
+        result = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode != 0:
+            logger.error(
+                "pg_dump failed (exit %d): %s",
+                result.returncode,
+                result.stderr[:500],
+            )
+            return None
+
+        size_mb = round(backup_path.stat().st_size / (1024 * 1024), 3)
+        logger.info("Backup created: %s (%.3f MB)", backup_name, size_mb)
 
         cleanup_old_backups()
         return str(backup_path)
 
+    except FileNotFoundError:
+        logger.error(
+            "Backup failed: pg_dump not found on PATH. "
+            "Ensure PostgreSQL bin directory is in the system PATH."
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        logger.error("Backup failed: pg_dump timed out after 120 seconds")
+        return None
     except Exception as exc:
         logger.error("Backup failed: %s", exc)
         return None
@@ -71,7 +128,8 @@ def cleanup_old_backups() -> None:
         if not _BACKUP_DIR.exists():
             return
         backups = sorted(
-            _BACKUP_DIR.glob("sentineledge_*.db"),
+            list(_BACKUP_DIR.glob("sentineledge_*.sql"))
+            + list(_BACKUP_DIR.glob("sentineledge_*.db")),  # legacy .db files
             key=lambda p: p.stat().st_mtime,
         )
         to_delete = backups[:-MAX_BACKUPS] if len(backups) > MAX_BACKUPS else []
@@ -92,7 +150,8 @@ def get_backup_list() -> list[dict]:
         if not _BACKUP_DIR.exists():
             return []
         backups = sorted(
-            _BACKUP_DIR.glob("sentineledge_*.db"),
+            list(_BACKUP_DIR.glob("sentineledge_*.sql"))
+            + list(_BACKUP_DIR.glob("sentineledge_*.db")),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
@@ -100,8 +159,8 @@ def get_backup_list() -> list[dict]:
         for f in backups:
             result.append({
                 "filename":   f.name,
-                "size_mb":    round(f.stat().st_size / (1024 * 1024), 2),
-                "created_at": now_iso(),   # approximation — real ts is in filename
+                "size_mb":    round(f.stat().st_size / (1024 * 1024), 3),
+                "created_at": now_iso(),
             })
         return result
     except Exception as exc:
@@ -116,14 +175,14 @@ async def schedule_daily_backup() -> None:
     Asyncio background task — runs create_backup() once per day at UTC midnight.
     Loops forever; a single backup failure does not stop the scheduler.
     """
-    logger.info("Daily backup scheduler started.")
+    logger.info("Daily backup scheduler started (pg_dump mode).")
     while True:
         wait = seconds_until_midnight()
         logger.info("Next backup in %.0f seconds (at midnight UTC).", wait)
         await asyncio.sleep(wait)
-        logger.info("Running daily backup...")
+        logger.info("Running daily pg_dump backup ...")
         path = create_backup()
         if path:
             logger.info("Daily backup completed: %s", path)
         else:
-            logger.warning("Daily backup completed with errors.")
+            logger.warning("Daily backup completed with errors — check logs.")

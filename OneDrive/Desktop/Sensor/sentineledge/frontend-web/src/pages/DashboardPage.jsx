@@ -3,15 +3,20 @@
  * Home overview — stat cards, live chart, mini alert preview.
  * Wrapped in an ErrorBoundary to surface crashes instead of blank screen.
  */
-import { Component } from 'react'
+import { Component, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight } from 'lucide-react'
+import { ArrowRight, Gauge, Droplets, Activity } from 'lucide-react'
 import TemperatureCard  from '../components/dashboard/TemperatureCard.jsx'
 import StatusCard       from '../components/dashboard/StatusCard.jsx'
 import AlertsTodayCard  from '../components/dashboard/AlertsTodayCard.jsx'
 import UptimeCard       from '../components/dashboard/UptimeCard.jsx'
 import LiveChart        from '../components/dashboard/LiveChart.jsx'
 import MiniAlertLog     from '../components/dashboard/MiniAlertLog.jsx'
+import SensorCard       from '../components/dashboard/SensorCard.jsx'
+
+/* ── Random helpers ─────────────────────────────────────────────────────────── */
+const randomInRange = (min, max) =>
+  (Math.random() * (max - min) + min).toFixed(2)
 
 /* ── Error boundary ── catches any render crash and shows a readable message ── */
 class ErrorBoundary extends Component {
@@ -44,17 +49,32 @@ class ErrorBoundary extends Component {
 /* ── Dashboard page ─────────────────────────────────────────────────────────── */
 export default function DashboardPage({ wsData, health, thresholds, onAlertCount }) {
   // Defensive destructure — all values have safe defaults
-  const lastReading     = wsData?.lastReading     ?? null
-  const readings        = wsData?.readings        ?? []
-  const isConnected     = wsData?.isConnected     ?? false
-  const connectionStatus= wsData?.connectionStatus?? 'CONNECTING'
+  const lastReading      = wsData?.lastReading      ?? null
+  const readings         = wsData?.readings         ?? []
+  const isConnected      = wsData?.isConnected      ?? false
+  const connectionStatus = wsData?.connectionStatus ?? 'CONNECTING'
 
   const navigate = useNavigate()
+
+  // ── Simulated sensor state ───────────────────────────────────────────────────
+  const [pressure,  setPressure]  = useState(() => randomInRange(1.98, 2.50))
+  const [humidity,  setHumidity]  = useState(() => randomInRange(54.0, 62.0))
+  const [vibration, setVibration] = useState(() => randomInRange(2.2,  2.5))
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setPressure(randomInRange(1.98, 2.50))
+      setHumidity(randomInRange(54.0, 62.0))
+      setVibration(randomInRange(2.2, 2.5))
+    }, 3000)
+    return () => clearInterval(id)
+  }, [])
 
   return (
     <ErrorBoundary>
       <div className="space-y-5">
-        {/* Row 1 — Stat cards */}
+
+        {/* Row 1 — Stat cards (4 columns) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <TemperatureCard reading={lastReading} thresholds={thresholds} />
           <StatusCard isConnected={isConnected} connectionStatus={connectionStatus} />
@@ -62,10 +82,41 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
           <UptimeCard uptimeSeconds={health?.uptime_seconds ?? null} />
         </div>
 
-        {/* Row 2 — Live chart */}
+        {/* Row 2 — Sensor parameter cards (3 columns, same grid as row 1) */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <SensorCard
+            icon={Gauge}
+            iconColor="#0EA5E9"
+            label="Pressure"
+            value={pressure}
+            unit="bar"
+            subtitle="Δ −0.2 predicted"
+            footer="Operating range 1.5 – 3.0 bar"
+          />
+          <SensorCard
+            icon={Droplets}
+            iconColor="#10B981"
+            label="Humidity"
+            value={humidity}
+            unit="%"
+            subtitle="Trending upward"
+            footer="Acceptable 40 – 70 %"
+          />
+          <SensorCard
+            icon={Activity}
+            iconColor="#F59E0B"
+            label="Vibration"
+            value={vibration}
+            unit="mm/s"
+            subtitle="RMS velocity"
+            footer="Limit < 4.5 mm/s"
+          />
+        </div>
+
+        {/* Row 3 — Live chart */}
         <LiveChart readings={readings} thresholds={thresholds} />
 
-        {/* Row 3 — Mini alert preview */}
+        {/* Row 4 — Mini alert preview */}
         <div className="card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
             <div>
@@ -83,6 +134,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
             <MiniAlertLog limit={5} onCountChange={onAlertCount} />
           </div>
         </div>
+
       </div>
     </ErrorBoundary>
   )

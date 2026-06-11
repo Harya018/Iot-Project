@@ -6,6 +6,9 @@ Production upgrades in this version:
   - Full OpenAPI documentation with descriptions, tags, and version
   - Startup tasks: DB backup + data retention schedulers
   - All timestamps UTC ISO 8601
+  - PostgreSQL connection pool (psycopg2 ThreadedConnectionPool)
+  - slowapi rate limiting on all public endpoints
+  - Persistent admin sessions (PostgreSQL admin_sessions table)
 """
 
 from __future__ import annotations
@@ -14,8 +17,18 @@ import asyncio
 import json
 import os
 import socket
+import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
+
+# ── Windows asyncio fix ────────────────────────────────────────────────────────
+# The default ProactorEventLoop on Windows emits noisy ConnectionResetError
+# (WinError 10054) when a WebSocket/SSL client disconnects abruptly.
+# Switching to SelectorEventLoopPolicy silences this cosmetic noise without
+# any functional change. Must be set before FastAPI/uvicorn starts the loop.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# ──────────────────────────────────────────────────────────────────────────────
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, APIRouter
 from fastapi.responses import JSONResponse
@@ -38,8 +51,13 @@ from utils.errors import SentinelEdgeError
 from utils.logger import get_logger
 from utils.time import now_iso
 
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse as _JSONResponse
+
 from middleware.cors import configure_cors
 from middleware.logger import log_requests
+from middleware.rate_limit import limiter
 
 from modules.inapp.manager import (
     add_connection, remove_connection, broadcast, active_connections,
@@ -68,10 +86,24 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
+
+    # 1. Initialise PostgreSQL connection pool + schema
+    database.get_db_pool()
     database.init_db()
+
+    # 2. Clean up any stale admin sessions from previous server runs
+    try:
+        from database.queries.sessions import cleanup_expired_sessions
+        expired = cleanup_expired_sessions()
+        if expired:
+            logger.info("Startup: cleaned up %d expired admin session(s)", expired)
+    except Exception as exc:
+        logger.warning("Startup: session cleanup failed: %s", exc)
+
+    # 3. Resume any pending escalations from before last shutdown
     await escalation.resume_pending_escalations()
 
-    # Background tasks
+    # 4. Background tasks
     asyncio.create_task(schedule_daily_report(),      name="daily-report-scheduler")
     asyncio.create_task(schedule_daily_backup(),      name="daily-backup-scheduler")
     asyncio.create_task(schedule_retention_cleanup(), name="retention-cleanup-scheduler")
@@ -81,7 +113,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         lan_ip = "127.0.0.1"
     logger.info(
-        "SentinelEdge v%s started -- https://%s:%d  (DEMO_MODE=%s, ENV=%s)",
+        "SentinelEdge v%s started -- http://%s:%d  (DEMO_MODE=%s, ENV=%s)",
         APP_VERSION, lan_ip, SERVER_PORT, DEMO_MODE, APP_ENV,
     )
 
@@ -97,6 +129,10 @@ async def lifespan(app: FastAPI):
             logger.warning("ADMIN_PASSWORD is default — change before deployment")
     else:
         logger.info("Running in DEVELOPMENT mode — using test configuration")
+
+    # 5. Start GSM SMS queue worker — owns the serial port for the server lifetime
+    from modules.sms.sender import start_gsm_worker
+    start_gsm_worker()
 
     yield
 
@@ -115,6 +151,11 @@ async def lifespan(app: FastAPI):
     active_connections.clear()
 
     await escalation.shutdown_escalations()
+    from modules.sms.sender import stop_gsm_worker
+    stop_gsm_worker()
+
+    # Close PostgreSQL connection pool
+    database.close_db_pool()
     logger.info("Shutdown complete.")
 
 
@@ -150,6 +191,25 @@ Admin endpoints require header:
 
 configure_cors(app)
 app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
+
+# ── Rate limiting (slowapi) ───────────────────────────────────────────────────
+app.state.limiter = limiter
+
+
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Return a structured JSON 429 response instead of the default plain text."""
+    return _JSONResponse(
+        status_code=429,
+        content={
+            "error":   "RateLimitExceeded",
+            "message": "Too many requests. Please slow down.",
+            "limit":   str(exc.detail),
+        },
+        headers={"Retry-After": "60"},
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 
 
 # ─── Global error handlers ────────────────────────────────────────────────────

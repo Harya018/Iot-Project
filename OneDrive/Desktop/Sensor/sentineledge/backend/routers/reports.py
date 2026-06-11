@@ -5,7 +5,7 @@ Endpoints:
     GET /api/reports/daily?days=30
 """
 
-from __future__ import annotations
+
 
 from fastapi import APIRouter, Depends, Query
 from datetime import datetime, timezone, timedelta
@@ -37,16 +37,16 @@ async def daily_reports(days: int = Query(30, ge=1, le=90)):
         try:
             readings = execute_read(
                 "SELECT temperature, timestamp FROM readings "
-                "WHERE timestamp >= ? AND timestamp <= ?",
+                "WHERE timestamp >= %s AND timestamp <= %s",
                 (start, end),
             )
             alerts = execute_read(
-                "SELECT id FROM alerts WHERE timestamp >= ? AND timestamp <= ?",
+                "SELECT id FROM alerts WHERE timestamp >= %s AND timestamp <= %s",
                 (start, end),
             )
             receipts = execute_read(
                 "SELECT channel, success, COUNT(*) as cnt FROM delivery_receipts "
-                "WHERE sent_at >= ? AND sent_at <= ? GROUP BY channel, success",
+                "WHERE sent_at >= %s AND sent_at <= %s GROUP BY channel, success",
                 (start, end),
             )
 

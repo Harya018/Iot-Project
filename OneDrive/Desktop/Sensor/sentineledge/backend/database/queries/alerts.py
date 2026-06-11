@@ -1,14 +1,17 @@
 """
 database/queries/alerts.py — Alert CRUD queries.
 
-Uses execute_write / execute_read so the shared connection is never closed.
+PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
+SQLite date functions replaced with PostgreSQL equivalents:
+  datetime('now', '-1 hour') → NOW() - INTERVAL '1 hour'
 """
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from database.connection import execute_write, execute_read, get_connection
+from database.connection import execute_write, execute_read, get_db_pool
 from utils.logger import get_logger
+import psycopg2.extras
 
 logger = get_logger(__name__)
 
@@ -29,11 +32,12 @@ def insert_alert(
             INSERT INTO alerts
                 (parameter, value, threshold, direction, severity, timestamp,
                  acknowledged, escalation_level, max_escalated, cooldown_until)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, 0, 1, 0, %s)
+            RETURNING id
             """,
             (parameter, value, threshold, direction, severity, ts, cooldown_until),
         )
-        return cur.lastrowid
+        return cur.lastrowid or -1
     except Exception as exc:
         logger.error("insert_alert failed: %s", exc)
         return -1
@@ -42,7 +46,7 @@ def insert_alert(
 def get_alert(alert_id: int) -> Optional[dict]:
     """Return a single alert by id, or None if not found."""
     try:
-        rows = execute_read("SELECT * FROM alerts WHERE id = ?", (alert_id,))
+        rows = execute_read("SELECT * FROM alerts WHERE id = %s", (alert_id,))
         return rows[0] if rows else None
     except Exception as exc:
         logger.error("get_alert failed: %s", exc)
@@ -67,8 +71,8 @@ def acknowledge_alert(alert_id: int, acknowledged_by: str) -> bool:
         execute_write(
             """
             UPDATE alerts
-            SET acknowledged = 1, acknowledged_by = ?, acknowledged_at = ?
-            WHERE id = ?
+            SET acknowledged = 1, acknowledged_by = %s, acknowledged_at = %s
+            WHERE id = %s
             """,
             (acknowledged_by, ts, alert_id),
         )
@@ -82,7 +86,7 @@ def update_escalation_level(alert_id: int, level: int) -> bool:
     """Update the current escalation level of an alert."""
     try:
         execute_write(
-            "UPDATE alerts SET escalation_level = ? WHERE id = ?",
+            "UPDATE alerts SET escalation_level = %s WHERE id = %s",
             (level, alert_id),
         )
         return True
@@ -95,7 +99,7 @@ def set_max_escalated(alert_id: int) -> bool:
     """Mark that maximum escalation has been reached for an alert."""
     try:
         execute_write(
-            "UPDATE alerts SET max_escalated = 1 WHERE id = ?", (alert_id,)
+            "UPDATE alerts SET max_escalated = 1 WHERE id = %s", (alert_id,)
         )
         return True
     except Exception as exc:
@@ -107,7 +111,7 @@ def get_recent_alerts(limit: int = 50) -> list:
     """Return the most recent `limit` alerts, newest first."""
     try:
         return execute_read(
-            "SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM alerts ORDER BY id DESC LIMIT %s", (limit,)
         )
     except Exception as exc:
         logger.error("get_recent_alerts failed: %s", exc)
@@ -119,9 +123,69 @@ def get_alerts_today_count() -> int:
     today = datetime.now(timezone.utc).date().isoformat()
     try:
         rows = execute_read(
-            "SELECT COUNT(*) as cnt FROM alerts WHERE timestamp >= ?", (today,)
+            "SELECT COUNT(*) as cnt FROM alerts WHERE timestamp >= %s", (today,)
         )
         return rows[0]["cnt"] if rows else 0
     except Exception as exc:
         logger.error("get_alerts_today_count failed: %s", exc)
         return 0
+
+
+def delete_alerts_by_period(period: str) -> int:
+    """
+    Delete alerts (and their delivery_receipts) by time period.
+
+    period: "1h" | "24h" | "7d" | "30d" | "all"
+    Returns the number of alert rows deleted.
+
+    PostgreSQL: uses NOW() - INTERVAL '...' instead of SQLite datetime().
+    """
+    PERIOD_MAP = {
+        "1h":  "NOW() - INTERVAL '1 hour'",
+        "24h": "NOW() - INTERVAL '1 day'",
+        "7d":  "NOW() - INTERVAL '7 days'",
+        "30d": "NOW() - INTERVAL '30 days'",
+    }
+
+    pool = get_db_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if period == "all":
+                cur.execute("SELECT COUNT(*) as cnt FROM alerts")
+                total = cur.fetchone()["cnt"]
+                cur.execute(
+                    "DELETE FROM delivery_receipts WHERE alert_id IN (SELECT id FROM alerts)"
+                )
+                cur.execute("DELETE FROM alerts")
+                conn.commit()
+                return total
+            else:
+                cutoff_expr = PERIOD_MAP.get(period)
+                if not cutoff_expr:
+                    logger.warning("delete_alerts_by_period: unknown period %s", period)
+                    return 0
+
+                # Get IDs first so we can cascade manually (no FK cascade)
+                cur.execute(
+                    f"SELECT id FROM alerts WHERE timestamp::TIMESTAMPTZ < {cutoff_expr}"
+                )
+                ids = [row["id"] for row in cur.fetchall()]
+
+                if not ids:
+                    conn.commit()
+                    return 0
+
+                cur.execute(
+                    "DELETE FROM delivery_receipts WHERE alert_id = ANY(%s)", (ids,)
+                )
+                cur.execute("DELETE FROM alerts WHERE id = ANY(%s)", (ids,))
+                conn.commit()
+                return len(ids)
+
+    except Exception as exc:
+        conn.rollback()
+        logger.error("delete_alerts_by_period(%s) failed: %s", period, exc)
+        return 0
+    finally:
+        pool.putconn(conn)

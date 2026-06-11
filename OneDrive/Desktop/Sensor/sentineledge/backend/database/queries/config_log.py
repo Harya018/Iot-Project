@@ -1,7 +1,8 @@
 """
 database/queries/config_log.py — Config audit log queries.
 
-Uses execute_write / execute_read so the shared connection is never closed.
+Uses execute_write / execute_read from connection.py.
+PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
 """
 
 from datetime import datetime, timezone
@@ -25,11 +26,12 @@ def log_config_change(
             """
             INSERT INTO config_changes
                 (changed_by, field_name, old_value, new_value, changed_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (changed_by, field_name, old_value, new_value, ts),
         )
-        return cur.lastrowid
+        return cur.lastrowid or -1
     except Exception as exc:
         logger.error("log_config_change failed: %s", exc)
         return -1
@@ -39,7 +41,7 @@ def get_recent_config_changes(limit: int = 50) -> list[dict]:
     """Return the most recent `limit` config changes, newest first."""
     try:
         return execute_read(
-            "SELECT * FROM config_changes ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM config_changes ORDER BY id DESC LIMIT %s", (limit,)
         )
     except Exception as exc:
         logger.error("get_recent_config_changes failed: %s", exc)

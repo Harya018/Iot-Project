@@ -3,12 +3,20 @@
  *
  * Uses RELATIVE URLs so this works whether the app is served
  * on port 5000, 8000, or any reverse proxy — no hardcoded host/port.
+ *
+ * Auth: Sends BOTH X-Admin-Password (legacy) AND Authorization: Bearer <token>
+ * (new) so either method works on the backend.
  */
 
-function adminHeaders() {
+function adminHeaders(overridePassword) {
+  const token    = sessionStorage.getItem('admin_token') || ''
+  const password = overridePassword
+    || sessionStorage.getItem('adminPassword')
+    || 'admin123'
   return {
-    'Content-Type': 'application/json',
-    'X-Admin-Password': sessionStorage.getItem('adminPassword') || 'admin123',
+    'Content-Type':    'application/json',
+    'X-Admin-Password': password,
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
   }
 }
 
@@ -33,17 +41,22 @@ async function req(method, path, body, headers = adminHeaders()) {
   return res.json()
 }
 
+// ── Auth ───────────────────────────────────────────────────────────────────────
+export const adminLogin              = (username, pin)   => req('POST', '/api/admin/login',             { username, pin }, jsonHeaders())
+
 // ── Core ──────────────────────────────────────────────────────────────────────
 export const fetchHealth             = ()             => req('GET',  '/api/health',                   undefined, jsonHeaders())
 export const fetchAlerts             = (limit = 50)   => req('GET',  `/api/alerts?limit=${limit}`,    undefined, jsonHeaders())
 export const acknowledgeAlert        = (id, name)     => req('POST', `/api/alerts/${id}/acknowledge`, { acknowledged_by: name })
 export const fetchSubscribers        = ()             => req('GET',  '/api/subscribers',              undefined, jsonHeaders())
-export const addSubscriber           = (data)         => req('POST', '/api/subscribers',              data)
-export const deleteSubscriber        = (id)           => req('DELETE',`/api/subscribers/${id}`,      undefined)
+export const addSubscriber           = (data, pwd)    => req('POST', '/api/subscribers',              data, adminHeaders(pwd))
+export const deleteSubscriber        = (id, pwd)      => req('DELETE',`/api/subscribers/${id}`,      undefined, adminHeaders(pwd))
+export const disableSubscriber       = (id, pwd)      => req('PATCH', `/api/subscribers/${id}/disable`, undefined, adminHeaders(pwd))
+export const enableSubscriber        = (id, pwd)      => req('PATCH', `/api/subscribers/${id}/enable`,  undefined, adminHeaders(pwd))
 export const setSubscriberPin        = (id, pin)      => req('POST', `/api/subscribers/${id}/set-pin`,{ subscriber_id: id, pin })
 export const fetchThresholds         = ()             => req('GET',  '/api/config/thresholds',        undefined, jsonHeaders())
-export const updateThresholds        = (data)         => req('POST', '/api/config/thresholds',        data)
-export const resetThresholds         = ()             => req('POST', '/api/config/thresholds/reset',  undefined)
+export const updateThresholds        = (data, pwd)    => req('POST', '/api/config/thresholds',        data, adminHeaders(pwd))
+export const resetThresholds         = (pwd)          => req('POST', '/api/config/thresholds/reset',  undefined, adminHeaders(pwd))
 export const simulateBreach          = ()             => req('POST', '/api/simulate/breach',          undefined)
 export const fetchRecentReadings     = ()             => req('GET',  '/api/readings/recent',          undefined, jsonHeaders())
 export const fetchAdminConfigChanges = ()             => req('GET',  '/api/admin/config-changes')
@@ -73,4 +86,17 @@ export const demoCoolingRun      = ()                 => req('POST', '/api/demo/
 export const demoReset           = ()                 => req('POST', '/api/demo/reset',       undefined)
 
 // ── Admin utilities ───────────────────────────────────────────────────────────
-export const importCsv           = (filename)         => req('POST', '/api/admin/import-csv', { filename })
+export const importCsv            = (filename)         => req('POST', '/api/admin/import-csv',           { filename })
+export const fetchAckLog          = (limit = 100)      => req('GET',  `/api/ack-log?limit=${limit}`)
+export const changeAdminPassword  = (current, newPwd)  => req('POST', '/api/admin/change-password',      { current_password: current, new_password: newPwd })
+export const getAdminProfile      = ()                 => req('GET',  '/api/admin/profile')
+export const updateAdminProfile   = (body)             => req('PATCH', '/api/admin/profile',               body)
+
+// ── Sub-admin management (main admin only) ────────────────────────────────────
+export const fetchAdmins          = ()                 => req('GET',  '/api/admin/admins')
+export const createSubAdmin       = (name, password)   => req('POST', '/api/admin/admins',               { name, password })
+export const deleteSubAdmin       = (id)               => req('DELETE',`/api/admin/admins/${id}`,        undefined)
+export const updateSubAdminPwd    = (id, newPwd)       => req('PUT',  `/api/admin/admins/${id}/password`,{ new_password: newPwd })
+
+// ── Alert management ─────────────────────────────────────────────────────────
+export const deleteAlerts         = (period)           => req('DELETE', `/api/alerts?period=${period}`)

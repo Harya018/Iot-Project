@@ -1,7 +1,8 @@
 """
 database/queries/escalation_log.py — Escalation log insert query.
 
-Uses execute_write so the shared connection is never closed.
+Uses execute_write from connection.py.
+PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
 """
 
 from datetime import datetime, timezone
@@ -26,11 +27,12 @@ def log_escalation(
             """
             INSERT INTO escalation_log
                 (alert_id, escalation_level, subscriber_id, sent_at, channel, success)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (alert_id, level, subscriber_id, ts, channel, int(success)),
         )
-        return cur.lastrowid
+        return cur.lastrowid or -1
     except Exception as exc:
         logger.error("log_escalation failed: %s", exc)
         return -1

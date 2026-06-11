@@ -2,39 +2,63 @@
 middleware/auth.py — Authentication dependencies for SentinelEdge.
 
 Provides two FastAPI dependency functions:
-  - require_admin         — enforces X-Admin-Password header
+  - require_admin         — enforces X-Admin-Password header OR Authorization: Bearer <token>
   - require_subscriber_auth — enforces X-Auth-Token header (subscriber JWT-lite)
+
+Admin session tokens are now stored in PostgreSQL (admin_sessions table) so
+they survive server restarts. The in-memory _login_sessions dict has been removed.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from config import ADMIN_PASSWORD
 
 
-def require_admin(x_admin_password: str = Header(default=None)) -> bool:
+def require_admin(
+    request: Request,
+    x_admin_password: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> bool:
     """
-    FastAPI dependency — enforces admin password on protected endpoints.
+    FastAPI dependency — enforces admin auth on protected endpoints.
 
-    Usage:
-        @router.post("/subscribers", dependencies=[Depends(require_admin)])
+    Accepts EITHER:
+      - X-Admin-Password: <password>   (always works — direct password check)
+      - Authorization: Bearer <token>  (session token from POST /api/admin/login)
 
-    Raises HTTP 401 if the header is missing or incorrect.
+    Session tokens are validated against the admin_sessions PostgreSQL table.
+    Raises HTTP 401 if neither is valid.
     Returns True on success.
     """
-    if not ADMIN_PASSWORD:
-        # If no password is configured, admin endpoints are open (dev mode)
+    from datetime import datetime, timezone
+
+    # 1. Check X-Admin-Password header (always valid regardless of sessions)
+    if x_admin_password and x_admin_password == ADMIN_PASSWORD:
         return True
-    if x_admin_password != ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing X-Admin-Password header.",
-            headers={"WWW-Authenticate": "X-Admin-Password"},
-        )
-    return True
+
+    # 2. Check Authorization: Bearer <token> against DB sessions
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+        if token:
+            # Lazy import to avoid circular dependency
+            from database.queries.sessions import get_session
+            session = get_session(token)
+            if session is not None:
+                return True
+
+    # 3. Dev-mode bypass: if no ADMIN_PASSWORD configured, allow all
+    if not ADMIN_PASSWORD:
+        return True
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing admin credentials (X-Admin-Password or Authorization: Bearer token).",
+        headers={"WWW-Authenticate": "X-Admin-Password"},
+    )
 
 
 def require_subscriber_auth(

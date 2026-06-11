@@ -1,124 +1,177 @@
 """
-database/connection.py — SQLite connection pool and schema initialiser.
+database/connection.py — PostgreSQL connection pool for SentinelEdge.
 
-Uses a single shared connection with a threading.Lock() for write safety.
-WAL (Write-Ahead Logging) mode prevents "database is locked" errors under
-concurrent reads during WebSocket streaming.
+Replaces the SQLite single-connection approach with a psycopg2
+ThreadedConnectionPool (min=2, max=20) so 100+ concurrent workers
+never exhaust connections.
+
+All queries use RealDictCursor so rows are returned as plain dicts —
+identical behaviour to the old sqlite3.Row factory.
 
 Public API:
-    get_connection()    → shared sqlite3.Connection
-    execute_write()     → thread-safe INSERT/UPDATE/DELETE
+    get_db_pool()       → ThreadedConnectionPool (initialises on first call)
+    close_db_pool()     → closes all pool connections on app shutdown
+    execute_write()     → thread-safe INSERT/UPDATE/DELETE, returns _WriteResult
     execute_read()      → thread-safe SELECT, returns list[dict]
     init_db()           → create schema + indexes on startup
 """
 
+from __future__ import annotations
+
 import os
-import sqlite3
 import threading
+from typing import Optional
+
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+import psycopg2.extensions
 
 from utils.logger import get_logger
 from config import MODULE_STATUS
 
 logger = get_logger(__name__)
 
-# ── Database path ─────────────────────────────────────────────────────────────
-# backend/database/connection.py → ../../database/sentineledge.db
-DB_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "database", "sentineledge.db")
+# ── Database URL ──────────────────────────────────────────────────────────────
+DATABASE_URL: str = os.getenv(
+    "DATABASE_URL",
+    "postgresql://sentineledge:sentineledge123@localhost:5432/sentineledge",
 )
 
-# ── Shared connection pool ────────────────────────────────────────────────────
-_connection: sqlite3.Connection = None
-_lock = threading.Lock()
+# ── Connection Pool ───────────────────────────────────────────────────────────
+_pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+_pool_lock = threading.Lock()
 
 
-def get_connection() -> sqlite3.Connection:
+class _WriteResult:
     """
-    Return the shared SQLite connection, creating it on first call.
+    Thin result wrapper returned by execute_write().
 
-    The connection is configured with:
-    - row_factory = sqlite3.Row  (dict-like row access)
-    - journal_mode = WAL         (concurrent reads without locking)
-    - foreign_keys = ON
-    - check_same_thread = False  (safe because writes go through _lock)
+    Captures rowcount and lastrowid (from RETURNING id) before the
+    cursor is closed, so callers use the same API as before:
+        cur = execute_write(...)
+        return cur.lastrowid   # for INSERTs
+        cur.rowcount           # for UPDATE/DELETE
     """
-    global _connection
-    if _connection is None:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        _connection = sqlite3.connect(
-            DB_PATH,
-            check_same_thread=False,
-            timeout=10,
-        )
-        _connection.row_factory = sqlite3.Row
-        _connection.execute("PRAGMA journal_mode=WAL;")
-        _connection.execute("PRAGMA foreign_keys=ON;")
-        _connection.execute("PRAGMA synchronous=NORMAL;")
-        logger.debug("SQLite connection created: %s", DB_PATH)
-    return _connection
+    __slots__ = ("rowcount", "lastrowid")
+
+    def __init__(self, rowcount: int, lastrowid: Optional[int]) -> None:
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
 
 
-def execute_write(sql: str, params: tuple = ()) -> sqlite3.Cursor:
+def get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    """Return the shared connection pool, initialising it on first call."""
+    global _pool
+    if _pool is None:
+        with _pool_lock:
+            if _pool is None:
+                logger.info("Initialising PostgreSQL connection pool ...")
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=2,
+                    maxconn=20,
+                    dsn=DATABASE_URL,
+                )
+                logger.info("PostgreSQL connection pool ready (min=2, max=20, dsn=%s)", DATABASE_URL)
+    return _pool
+
+
+def close_db_pool() -> None:
+    """Close all connections in the pool. Call on application shutdown."""
+    global _pool
+    if _pool is not None:
+        _pool.closeall()
+        _pool = None
+        logger.info("PostgreSQL connection pool closed.")
+
+
+def execute_write(sql: str, params: tuple = ()) -> _WriteResult:
     """
-    Execute an INSERT, UPDATE, or DELETE inside the write lock.
+    Execute an INSERT, UPDATE, or DELETE inside a transaction.
 
-    Returns the cursor so callers can read lastrowid if needed.
+    If the SQL contains RETURNING, the first column of the first
+    returned row is captured as `lastrowid` (typically `id`).
+
+    Returns a _WriteResult with `.lastrowid` and `.rowcount`.
+    Rolls back automatically on any exception.
     """
-    with _lock:
-        conn = get_connection()
-        cursor = conn.execute(sql, params)
-        conn.commit()
-        return cursor
+    pool = get_db_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rowcount = cur.rowcount
+            lastrowid: Optional[int] = None
+            if "RETURNING" in sql.upper():
+                row = cur.fetchone()
+                if row:
+                    row_dict = dict(row)
+                    # Grab 'id' if present; otherwise first column value
+                    lastrowid = row_dict.get("id") or next(iter(row_dict.values()), None)
+            conn.commit()
+        return _WriteResult(rowcount=rowcount, lastrowid=lastrowid)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
 
 
 def execute_read(sql: str, params: tuple = ()) -> list[dict]:
     """
-    Execute a SELECT and return all rows as a list of plain dicts.
+    Execute a SELECT (or UPDATE ... RETURNING) and return all rows as
+    a list of plain dicts.
     """
-    conn = get_connection()
-    cursor = conn.execute(sql, params)
-    return [dict(row) for row in cursor.fetchall()]
+    pool = get_db_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        pool.putconn(conn)
 
 
-# ── Schema ────────────────────────────────────────────────────────────────────
+# ── Schema (PostgreSQL syntax) ────────────────────────────────────────────────
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS readings (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    temperature REAL    NOT NULL,
-    timestamp   TEXT    NOT NULL,
-    is_valid    INTEGER DEFAULT 1
+    id          SERIAL          PRIMARY KEY,
+    temperature DOUBLE PRECISION NOT NULL,
+    timestamp   TEXT            NOT NULL,
+    is_valid    INTEGER         DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    parameter        TEXT    NOT NULL,
-    value            REAL    NOT NULL,
-    threshold        REAL    NOT NULL,
-    direction        TEXT    NOT NULL,
-    severity         TEXT    NOT NULL DEFAULT 'WARNING',
-    timestamp        TEXT    NOT NULL,
-    acknowledged     INTEGER DEFAULT 0,
+    id               SERIAL           PRIMARY KEY,
+    parameter        TEXT             NOT NULL,
+    value            DOUBLE PRECISION NOT NULL,
+    threshold        DOUBLE PRECISION NOT NULL,
+    direction        TEXT             NOT NULL,
+    severity         TEXT             NOT NULL DEFAULT 'WARNING',
+    timestamp        TEXT             NOT NULL,
+    acknowledged     INTEGER          DEFAULT 0,
     acknowledged_by  TEXT,
     acknowledged_at  TEXT,
-    escalation_level INTEGER DEFAULT 1,
-    max_escalated    INTEGER DEFAULT 0,
+    escalation_level INTEGER          DEFAULT 1,
+    max_escalated    INTEGER          DEFAULT 0,
     cooldown_until   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscribers (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL  PRIMARY KEY,
     name             TEXT    NOT NULL,
     phone            TEXT    NOT NULL,
     email            TEXT    NOT NULL,
     pin              TEXT    DEFAULT NULL,
     escalation_order INTEGER NOT NULL UNIQUE,
     active           INTEGER DEFAULT 1,
+    is_active        INTEGER DEFAULT 1,
     created_at       TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS escalation_log (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL  PRIMARY KEY,
     alert_id         INTEGER NOT NULL,
     escalation_level INTEGER NOT NULL,
     subscriber_id    INTEGER NOT NULL,
@@ -128,7 +181,7 @@ CREATE TABLE IF NOT EXISTS escalation_log (
 );
 
 CREATE TABLE IF NOT EXISTS delivery_receipts (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL  PRIMARY KEY,
     alert_id         INTEGER NOT NULL,
     channel          TEXT    NOT NULL,
     subscriber_id    INTEGER NOT NULL,
@@ -139,15 +192,31 @@ CREATE TABLE IF NOT EXISTS delivery_receipts (
 );
 
 CREATE TABLE IF NOT EXISTS config_changes (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    changed_by  TEXT NOT NULL,
-    field_name  TEXT NOT NULL,
-    old_value   TEXT NOT NULL,
-    new_value   TEXT NOT NULL,
-    changed_at  TEXT NOT NULL
+    id          SERIAL PRIMARY KEY,
+    changed_by  TEXT   NOT NULL,
+    field_name  TEXT   NOT NULL,
+    old_value   TEXT   NOT NULL,
+    new_value   TEXT   NOT NULL,
+    changed_at  TEXT   NOT NULL
 );
 
--- Indexes for common query patterns
+CREATE TABLE IF NOT EXISTS admins (
+    id            SERIAL PRIMARY KEY,
+    name          TEXT   NOT NULL UNIQUE,
+    password_hash TEXT   NOT NULL,
+    role          TEXT   NOT NULL DEFAULT 'sub',
+    created_at    TEXT   NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    id           SERIAL      PRIMARY KEY,
+    token        TEXT        NOT NULL UNIQUE,
+    created_at   TIMESTAMPTZ DEFAULT NOW(),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    last_used_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp
     ON alerts(timestamp);
 CREATE INDEX IF NOT EXISTS idx_alerts_acknowledged
@@ -156,128 +225,130 @@ CREATE INDEX IF NOT EXISTS idx_readings_timestamp
     ON readings(timestamp);
 CREATE INDEX IF NOT EXISTS idx_subscribers_order
     ON subscribers(escalation_order);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_token
+    ON admin_sessions(token);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
+    ON admin_sessions(expires_at);
 """
 
 
-def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply schema migrations for columns added/removed after initial deployment."""
+def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
+    """
+    Apply schema migrations using PostgreSQL information_schema.
+
+    Adds any columns or tables that were introduced after the initial
+    deployment without touching existing data.
+    """
+    conn = pool.getconn()
     try:
-        # ── readings table ────────────────────────────────────────────────────
-        cursor = conn.execute("PRAGMA table_info(readings)")
-        reading_cols = {row[1] for row in cursor.fetchall()}
+        with conn.cursor() as cur:
 
-        # Migration 1: add is_valid if missing
-        if "is_valid" not in reading_cols:
-            conn.execute("ALTER TABLE readings ADD COLUMN is_valid INTEGER DEFAULT 1")
-            conn.commit()
-            logger.info("Migration: added is_valid column to readings table")
+            # Helper: check if a column exists in a table
+            def col_exists(table: str, column: str) -> bool:
+                cur.execute(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = %s AND column_name = %s
+                    """,
+                    (table, column),
+                )
+                return cur.fetchone() is not None
 
-        # Migration 2: remove humidity column (temperature-only system).
-        # SQLite doesn't support DROP COLUMN until v3.35; use rename-create-copy-drop.
-        if "humidity" in reading_cols:
-            logger.info("Migration: removing humidity column from readings table")
-            conn.executescript("""
-                PRAGMA foreign_keys=OFF;
-                BEGIN;
-                CREATE TABLE readings_new (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    temperature REAL    NOT NULL,
-                    timestamp   TEXT    NOT NULL,
-                    is_valid    INTEGER DEFAULT 1
-                );
-                INSERT INTO readings_new (id, temperature, timestamp, is_valid)
-                    SELECT id, temperature, timestamp,
-                           COALESCE(is_valid, 1)
-                    FROM readings;
-                DROP TABLE readings;
-                ALTER TABLE readings_new RENAME TO readings;
-                CREATE INDEX IF NOT EXISTS idx_readings_timestamp ON readings(timestamp);
-                COMMIT;
-                PRAGMA foreign_keys=ON;
-            """)
-            logger.info("Migration: humidity column removed from readings table")
+            # Helper: check if a table exists
+            def table_exists(table: str) -> bool:
+                cur.execute(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_name = %s
+                    """,
+                    (table,),
+                )
+                return cur.fetchone() is not None
 
-        # ── alerts table ──────────────────────────────────────────────────────
-        cursor = conn.execute("PRAGMA table_info(alerts)")
-        alert_cols = {row[1] for row in cursor.fetchall()}
+            # Migration 1: readings.is_valid
+            if table_exists("readings") and not col_exists("readings", "is_valid"):
+                cur.execute("ALTER TABLE readings ADD COLUMN is_valid INTEGER DEFAULT 1")
+                logger.info("Migration: added is_valid column to readings")
 
-        # Migration 3: add severity column if missing
-        if "severity" not in alert_cols:
-            conn.execute(
-                "ALTER TABLE alerts ADD COLUMN severity TEXT NOT NULL DEFAULT 'WARNING'"
-            )
-            conn.commit()
-            logger.info("Migration: added severity column to alerts table")
+            # Migration 2: alerts.severity
+            if table_exists("alerts") and not col_exists("alerts", "severity"):
+                cur.execute(
+                    "ALTER TABLE alerts ADD COLUMN severity TEXT NOT NULL DEFAULT 'WARNING'"
+                )
+                logger.info("Migration: added severity column to alerts")
 
-        # Migration 4: add max_escalated column if missing
-        if "max_escalated" not in alert_cols:
-            conn.execute(
-                "ALTER TABLE alerts ADD COLUMN max_escalated INTEGER DEFAULT 0"
-            )
-            conn.commit()
-            logger.info("Migration: added max_escalated column to alerts table")
+            # Migration 3: alerts.max_escalated
+            if table_exists("alerts") and not col_exists("alerts", "max_escalated"):
+                cur.execute(
+                    "ALTER TABLE alerts ADD COLUMN max_escalated INTEGER DEFAULT 0"
+                )
+                logger.info("Migration: added max_escalated column to alerts")
 
-        # Migration 5: add cooldown_until column if missing
-        if "cooldown_until" not in alert_cols:
-            conn.execute("ALTER TABLE alerts ADD COLUMN cooldown_until TEXT")
-            conn.commit()
-            logger.info("Migration: added cooldown_until column to alerts table")
+            # Migration 4: alerts.cooldown_until
+            if table_exists("alerts") and not col_exists("alerts", "cooldown_until"):
+                cur.execute("ALTER TABLE alerts ADD COLUMN cooldown_until TEXT")
+                logger.info("Migration: added cooldown_until column to alerts")
 
-        # ── subscribers table ─────────────────────────────────────────────────
-        cursor = conn.execute("PRAGMA table_info(subscribers)")
-        subscriber_cols = {row[1] for row in cursor.fetchall()}
+            # Migration 5: subscribers.pin
+            if table_exists("subscribers") and not col_exists("subscribers", "pin"):
+                cur.execute("ALTER TABLE subscribers ADD COLUMN pin TEXT DEFAULT NULL")
+                logger.info("Migration: added pin column to subscribers")
 
-        # Migration 6: remove push_subscription column.
-        # SQLite doesn't support DROP COLUMN until v3.35; use rename-create-copy-drop.
-        if "push_subscription" in subscriber_cols:
-            logger.info("Migration: removing push_subscription column from subscribers table")
-            conn.executescript("""
-                PRAGMA foreign_keys=OFF;
-                BEGIN;
-                CREATE TABLE subscribers_new (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name             TEXT    NOT NULL,
-                    phone            TEXT    NOT NULL,
-                    email            TEXT    NOT NULL,
-                    escalation_order INTEGER NOT NULL UNIQUE,
-                    active           INTEGER DEFAULT 1,
-                    created_at       TEXT    NOT NULL
-                );
-                INSERT INTO subscribers_new
-                        (id, name, phone, email, escalation_order, active, created_at)
-                    SELECT id, name, phone, email, escalation_order, active, created_at
-                    FROM subscribers;
-                DROP TABLE subscribers;
-                ALTER TABLE subscribers_new RENAME TO subscribers;
-                CREATE INDEX IF NOT EXISTS idx_subscribers_order
-                    ON subscribers(escalation_order);
-                COMMIT;
-                PRAGMA foreign_keys=ON;
-            """)
-            logger.info("Migration: push_subscription column removed from subscribers table")
+            # Migration 6: subscribers.is_active
+            if table_exists("subscribers") and not col_exists("subscribers", "is_active"):
+                cur.execute(
+                    "ALTER TABLE subscribers ADD COLUMN is_active INTEGER DEFAULT 1"
+                )
+                cur.execute("UPDATE subscribers SET is_active = active")
+                logger.info("Migration: added is_active column to subscribers")
 
-        # Migration 7: add pin column if missing (nullable TEXT -- stores SHA-256 hash)
-        if "pin" not in subscriber_cols:
-            conn.execute("ALTER TABLE subscribers ADD COLUMN pin TEXT DEFAULT NULL")
-            conn.commit()
-            logger.info("Migration: added pin column to subscribers table")
+            # Migration 7: admin_sessions table
+            if not table_exists("admin_sessions"):
+                cur.execute("""
+                    CREATE TABLE admin_sessions (
+                        id           SERIAL      PRIMARY KEY,
+                        token        TEXT        NOT NULL UNIQUE,
+                        created_at   TIMESTAMPTZ DEFAULT NOW(),
+                        expires_at   TIMESTAMPTZ NOT NULL,
+                        last_used_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX idx_admin_sessions_token ON admin_sessions(token)"
+                )
+                cur.execute(
+                    "CREATE INDEX idx_admin_sessions_expires ON admin_sessions(expires_at)"
+                )
+                logger.info("Migration: created admin_sessions table")
 
+        conn.commit()
     except Exception as exc:
+        conn.rollback()
         logger.warning("Migration warning: %s", exc)
+    finally:
+        pool.putconn(conn)
 
 
 def init_db() -> None:
     """Create all tables and indexes if they do not already exist."""
     try:
-        conn = get_connection()
-        with _lock:
-            conn.executescript(_SCHEMA_SQL)
+        pool = get_db_pool()
+        conn = pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Execute each statement individually (executescript not available in psycopg2)
+                for statement in _SCHEMA_SQL.split(";"):
+                    stmt = statement.strip()
+                    if stmt:
+                        cur.execute(stmt)
             conn.commit()
-        _run_migrations(conn)
-        logger.info("Database initialised at %s", DB_PATH)
+        finally:
+            pool.putconn(conn)
+
+        _run_migrations(pool)
+        logger.info("Database initialised (PostgreSQL).")
         MODULE_STATUS["database"] = "ok"
     except Exception as exc:
         logger.exception("Failed to initialise database: %s", exc)
         MODULE_STATUS["database"] = f"error: {exc}"
         raise
-

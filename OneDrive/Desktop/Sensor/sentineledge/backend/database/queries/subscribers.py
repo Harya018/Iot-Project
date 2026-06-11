@@ -1,13 +1,15 @@
 """
 database/queries/subscribers.py — Subscriber CRUD queries.
 
-Uses execute_write / execute_read so the shared connection is never closed.
+PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
+Removed sqlite3 import (no longer needed; psycopg2.errors used instead).
 """
 
 import hashlib
-import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
+
+import psycopg2.errors
 
 from database.connection import execute_write, execute_read
 from utils.logger import get_logger
@@ -21,10 +23,10 @@ def _hash_pin(pin: str) -> str:
 
 
 def get_subscribers_ordered() -> list:
-    """Return all active subscribers ordered by escalation_order ASC."""
+    """Return ALL subscribers ordered by escalation_order ASC (active + disabled)."""
     try:
         return execute_read(
-            "SELECT * FROM subscribers WHERE active = 1 ORDER BY escalation_order ASC"
+            "SELECT * FROM subscribers ORDER BY escalation_order ASC"
         )
     except Exception as exc:
         logger.error("get_subscribers_ordered failed: %s", exc)
@@ -32,15 +34,28 @@ def get_subscribers_ordered() -> list:
 
 
 def get_subscriber_by_order(order: int) -> Optional[dict]:
-    """Return the active subscriber at a specific escalation_order, or None."""
+    """Return the subscriber at a specific escalation_order, or None."""
     try:
         rows = execute_read(
-            "SELECT * FROM subscribers WHERE escalation_order = ? AND active = 1",
+            "SELECT * FROM subscribers WHERE escalation_order = %s",
             (order,),
         )
         return rows[0] if rows else None
     except Exception as exc:
         logger.error("get_subscriber_by_order failed: %s", exc)
+        return None
+
+
+def get_subscriber_by_id(subscriber_id: int) -> Optional[dict]:
+    """Return a subscriber by primary key, or None."""
+    try:
+        rows = execute_read(
+            "SELECT * FROM subscribers WHERE id = %s",
+            (subscriber_id,),
+        )
+        return rows[0] if rows else None
+    except Exception as exc:
+        logger.error("get_subscriber_by_id failed: %s", exc)
         return None
 
 
@@ -56,8 +71,8 @@ def get_subscriber_by_name_and_pin(name: str, pin: str) -> Optional[dict]:
         rows = execute_read(
             """
             SELECT * FROM subscribers
-            WHERE LOWER(name) = LOWER(?)
-              AND pin = ?
+            WHERE LOWER(name) = LOWER(%s)
+              AND pin = %s
               AND active = 1
             """,
             (name, hashed),
@@ -75,6 +90,7 @@ def add_subscriber(
     """Insert a new subscriber and return its row id.
 
     If *pin* is provided it is stored as a SHA-256 hash.
+    Returns -1 on duplicate escalation_order or any other error.
     """
     try:
         ts = datetime.now(timezone.utc).isoformat()
@@ -83,12 +99,13 @@ def add_subscriber(
             """
             INSERT INTO subscribers
                 (name, phone, email, pin, escalation_order, active, created_at)
-            VALUES (?, ?, ?, ?, ?, 1, ?)
+            VALUES (%s, %s, %s, %s, %s, 1, %s)
+            RETURNING id
             """,
             (name, phone, email, hashed_pin, escalation_order, ts),
         )
-        return cur.lastrowid
-    except sqlite3.IntegrityError as exc:
+        return cur.lastrowid or -1
+    except psycopg2.errors.UniqueViolation as exc:
         logger.error("add_subscriber UNIQUE conflict: %s", exc)
         return -1
     except Exception as exc:
@@ -101,7 +118,7 @@ def set_subscriber_pin(subscriber_id: int, pin: str) -> bool:
     try:
         hashed = _hash_pin(pin)
         execute_write(
-            "UPDATE subscribers SET pin = ? WHERE id = ?",
+            "UPDATE subscribers SET pin = %s WHERE id = %s",
             (hashed, subscriber_id),
         )
         return True
@@ -114,7 +131,7 @@ def update_push_subscription(subscriber_id: int, push_subscription_json: str) ->
     """Save or update the Web Push subscription JSON for a subscriber."""
     try:
         execute_write(
-            "UPDATE subscribers SET push_subscription = ? WHERE id = ?",
+            "UPDATE subscribers SET push_subscription = %s WHERE id = %s",
             (push_subscription_json, subscriber_id),
         )
         return True
@@ -126,8 +143,34 @@ def update_push_subscription(subscriber_id: int, push_subscription_json: str) ->
 def delete_subscriber(subscriber_id: int) -> bool:
     """Hard-delete a subscriber by id. Returns True on success."""
     try:
-        execute_write("DELETE FROM subscribers WHERE id = ?", (subscriber_id,))
+        execute_write("DELETE FROM subscribers WHERE id = %s", (subscriber_id,))
         return True
     except Exception as exc:
         logger.error("delete_subscriber failed: %s", exc)
+        return False
+
+
+def disable_subscriber(subscriber_id: int) -> bool:
+    """Set is_active=0 for a subscriber. Returns True on success."""
+    try:
+        execute_write(
+            "UPDATE subscribers SET is_active = 0 WHERE id = %s",
+            (subscriber_id,),
+        )
+        return True
+    except Exception as exc:
+        logger.error("disable_subscriber failed: %s", exc)
+        return False
+
+
+def enable_subscriber(subscriber_id: int) -> bool:
+    """Set is_active=1 for a subscriber. Returns True on success."""
+    try:
+        execute_write(
+            "UPDATE subscribers SET is_active = 1 WHERE id = %s",
+            (subscriber_id,),
+        )
+        return True
+    except Exception as exc:
+        logger.error("enable_subscriber failed: %s", exc)
         return False

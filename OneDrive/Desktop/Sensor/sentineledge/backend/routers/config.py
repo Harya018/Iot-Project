@@ -69,6 +69,22 @@ async def update_thresholds(body: ThresholdConfigIn):
     _config.RUNTIME_SOURCE = "runtime_override"
     _config.RUNTIME_LAST_CHANGED = datetime.now(timezone.utc).isoformat()
     logger.info("Thresholds updated at runtime: %s", RUNTIME_THRESHOLDS)
+
+    # Broadcast to all WebSocket clients (mobile app + web)
+    try:
+        from modules.inapp.manager import broadcast as _broadcast
+        await _broadcast({
+            "type":         "config_update",
+            "thresholds": {
+                "temp_high": RUNTIME_THRESHOLDS["temp_high"],
+                "temp_low":  RUNTIME_THRESHOLDS["temp_low"],
+            },
+            "source":       _config.RUNTIME_SOURCE,
+            "changed_at":   _config.RUNTIME_LAST_CHANGED,
+        })
+    except Exception as exc:
+        logger.warning("config_update broadcast failed: %s", exc)
+
     return ThresholdConfigOut(**RUNTIME_THRESHOLDS)
 
 
@@ -95,6 +111,22 @@ async def reset_thresholds():
     _config.RUNTIME_SOURCE = "default"
     _config.RUNTIME_LAST_CHANGED = datetime.now(timezone.utc).isoformat()
     logger.info("Thresholds reset to defaults: %s", RUNTIME_THRESHOLDS)
+
+    # Broadcast reset to all WebSocket clients
+    try:
+        from modules.inapp.manager import broadcast as _broadcast
+        await _broadcast({
+            "type":       "config_update",
+            "thresholds": {
+                "temp_high": RUNTIME_THRESHOLDS["temp_high"],
+                "temp_low":  RUNTIME_THRESHOLDS["temp_low"],
+            },
+            "source":     _config.RUNTIME_SOURCE,
+            "changed_at": _config.RUNTIME_LAST_CHANGED,
+        })
+    except Exception as exc:
+        logger.warning("config_update broadcast failed: %s", exc)
+
     return {
         "status": "reset",
         "thresholds": {

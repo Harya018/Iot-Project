@@ -1,8 +1,8 @@
 """
 database/queries/readings.py — Sensor reading queries (temperature only).
 
-Uses execute_write / execute_read from connection.py so the shared
-connection is never closed and no connection-per-call overhead occurs.
+Uses execute_write / execute_read from connection.py.
+PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
 """
 
 from database.connection import execute_write, execute_read
@@ -20,10 +20,10 @@ def insert_reading(
     try:
         cur = execute_write(
             "INSERT INTO readings (temperature, timestamp, is_valid) "
-            "VALUES (?, ?, ?)",
+            "VALUES (%s, %s, %s) RETURNING id",
             (temperature, timestamp, int(is_valid)),
         )
-        return cur.lastrowid
+        return cur.lastrowid or -1
     except Exception as exc:
         logger.error("insert_reading failed: %s", exc)
         return -1
@@ -33,7 +33,7 @@ def get_recent_readings(limit: int = 60) -> list:
     """Return the most recent `limit` readings, oldest first."""
     try:
         rows = execute_read(
-            "SELECT * FROM readings ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM readings ORDER BY id DESC LIMIT %s", (limit,)
         )
         return list(reversed(rows))
     except Exception as exc:

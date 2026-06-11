@@ -6,7 +6,19 @@ python-dotenv==1.0.1
 requests==2.31.0
 aiofiles==23.2.1
 pydantic==2.7.0
-# Module 3 — SMS via USB GSM modem (optional, only needed for SMS_METHOD=gammu)
+
+# ── PostgreSQL drivers ────────────────────────────────────────────────────────
+psycopg2-binary==2.9.9
+asyncpg==0.29.0
+databases[asyncpg]==0.9.0
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+slowapi==0.1.9
+
+# ── USB temperature sensor ────────────────────────────────────────────────────
+pyserial==3.5
+
+# ── SMS via USB GSM modem (optional, only for SMS_METHOD=gammu) ───────────────
 # Windows: pip install python-gammu   Linux/macOS: pip install gammu
 # python-gammu; sys_platform == "win32"
 # gammu; sys_platform != "win32"

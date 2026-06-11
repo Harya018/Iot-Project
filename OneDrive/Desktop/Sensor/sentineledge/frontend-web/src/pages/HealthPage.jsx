@@ -1,13 +1,18 @@
 /**
  * src/pages/HealthPage.jsx
  * Full system health — modules, DB stats, config changes, backup.
+ * Includes GSM modem status banner and Test SMS button.
  */
 import { useState, useEffect, useCallback } from 'react'
 import {
   RefreshCw, Thermometer, Database, Mail, MessageSquare,
-  Wifi, CheckCircle, AlertTriangle, XCircle, Archive
+  Wifi, CheckCircle, AlertTriangle, XCircle, Archive,
+  Signal, SignalZero, Send, X,
 } from 'lucide-react'
-import { fetchHealth, fetchDatabaseStats, fetchAdminConfigChanges, createBackup } from '../services/api.js'
+import {
+  fetchHealth, fetchDatabaseStats, fetchAdminConfigChanges,
+  createBackup, fetchSubscribers,
+} from '../services/api.js'
 import { utcToIST, timeAgo } from '../utils/time.js'
 import Badge from '../components/shared/Badge.jsx'
 import { useToast, ToastContainer } from '../components/shared/Toast.jsx'
@@ -43,17 +48,27 @@ export default function HealthPage() {
   const [loading, setLoading] = useState(false)
   const [backing, setBacking] = useState(false)
 
+  // Test SMS modal state
+  const [smsModal,   setSmsModal]   = useState(false)
+  const [smsPhone,   setSmsPhone]   = useState('')
+  const [smsSending, setSmsSending] = useState(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [h, s, c] = await Promise.allSettled([
-        fetchHealth(), fetchDatabaseStats(), fetchAdminConfigChanges()
+      const [h, s, c, subs] = await Promise.allSettled([
+        fetchHealth(), fetchDatabaseStats(), fetchAdminConfigChanges(), fetchSubscribers(),
       ])
       if (h.status === 'fulfilled') setHealth(h.value)
       if (s.status === 'fulfilled') setStats(s.value)
       if (c.status === 'fulfilled') setChanges(c.value)
+      // Pre-fill Test SMS with first active subscriber's phone
+      if (subs.status === 'fulfilled') {
+        const first = (subs.value || []).find(sub => sub.is_active && sub.phone)
+        if (first) setSmsPhone(prev => prev || first.phone)
+      }
     } finally { setLoading(false) }
-  }, [])
+  }, [])  // eslint-disable-line
 
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
 
@@ -67,14 +82,99 @@ export default function HealthPage() {
     finally { setBacking(false) }
   }
 
-  const modules  = health?.modules || {}
-  const overall  = health?.status
-  const overallBg = overall === 'ok' ? '#ECFDF5' : overall === 'degraded' ? '#FFFBEB' : '#FEF2F2'
+  const handleTestSms = async () => {
+    if (!smsPhone.trim()) return
+    setSmsSending(true)
+    try {
+      const token    = sessionStorage.getItem('admin_token') || ''
+      const password = sessionStorage.getItem('adminPassword') || 'admin123'
+      const res = await fetch('/api/admin/test-sms', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Password': password,
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ phone: smsPhone.trim() }),
+        credentials: 'include',
+      })
+      const data = await res.json()
+      if (res.ok) {
+        const isMock = data.mode === 'mock'
+        addToast({
+          type: 'success',
+          message: isMock
+            ? `📱 [MOCK] SMS logged for ${smsPhone} — no modem connected`
+            : `✅ SMS sent to ${smsPhone} — check your phone`,
+        })
+        setSmsModal(false)
+      } else {
+        addToast({ type: 'error', message: `SMS failed: ${data.error || 'Unknown error'}` })
+      }
+    } catch (e) {
+      addToast({ type: 'error', message: 'Test SMS error: ' + e.message })
+    } finally {
+      setSmsSending(false)
+    }
+  }
+
+  const modules     = health?.modules || {}
+  const overall     = health?.status
+  const overallBg    = overall === 'ok' ? '#ECFDF5' : overall === 'degraded' ? '#FFFBEB' : '#FEF2F2'
   const overallColor = overall === 'ok' ? '#065F46' : overall === 'degraded' ? '#92400E' : '#991B1B'
+
+  // GSM modem info
+  const gsm     = health?.gsm_modem
+  const gsmMode = gsm?.mode || 'mock'
+  const gsmPort = gsm?.port || 'not detected'
+  const gsmLive = gsmMode === 'live'
 
   return (
     <>
       <div className="space-y-5">
+
+        {/* ── GSM Modem status banner ── */}
+        {gsm && (
+          <div
+            className="card px-5 py-3 flex items-center justify-between gap-3"
+            style={{
+              background: gsmLive ? '#ECFDF5' : '#FFFBEB',
+              border:     `1px solid ${gsmLive ? '#10B98130' : '#F59E0B50'}`,
+            }}
+          >
+            <div className="flex items-center gap-3">
+              {gsmLive
+                ? <Signal     size={20} style={{ color: '#10B981', flexShrink: 0 }} />
+                : <SignalZero size={20} style={{ color: '#D97706', flexShrink: 0 }} />
+              }
+              <div>
+                <p className="text-sm font-semibold" style={{ color: gsmLive ? '#065F46' : '#92400E' }}>
+                  {gsmLive
+                    ? `✓ GSM Modem Connected on ${gsmPort} — SMS alerts active`
+                    : '⚠ GSM Modem Not Connected — SMS alerts are in mock mode'}
+                </p>
+                {!gsmLive && (
+                  <p className="text-xs mt-0.5" style={{ color: '#B45309' }}>
+                    Plug in the GSM dongle and restart the server to enable real SMS delivery.
+                  </p>
+                )}
+              </div>
+            </div>
+            <button
+              id="btn-test-sms"
+              onClick={() => setSmsModal(true)}
+              className="btn btn-sm flex items-center gap-1.5 whitespace-nowrap"
+              style={{
+                background: gsmLive ? '#10B981' : '#F59E0B',
+                color: '#fff',
+                border: 'none',
+              }}
+            >
+              <Send size={13} /> Send Test SMS
+            </button>
+          </div>
+        )}
+
         {/* Overall status banner */}
         <div
           className="card px-6 py-4 flex items-center justify-between"
@@ -204,6 +304,76 @@ export default function HealthPage() {
           </div>
         </div>
       </div>
+
+      {/* ── Test SMS Modal ── */}
+      {smsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.45)' }}
+          onClick={e => { if (e.target === e.currentTarget) setSmsModal(false) }}
+        >
+          <div className="card p-6 w-full max-w-sm shadow-2xl" style={{ margin: '1rem' }}>
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="text-base font-bold text-gray-900">Send Test SMS</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Mode: <span
+                    className="font-semibold"
+                    style={{ color: gsmLive ? '#10B981' : '#D97706' }}
+                  >
+                    {gsmLive ? `LIVE (${gsmPort})` : 'MOCK — will only log'}
+                  </span>
+                </p>
+              </div>
+              <button
+                onClick={() => setSmsModal(false)}
+                className="btn btn-ghost btn-sm"
+                id="btn-test-sms-close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Phone Number
+            </label>
+            <input
+              id="test-sms-phone"
+              type="tel"
+              value={smsPhone}
+              onChange={e => setSmsPhone(e.target.value)}
+              placeholder="+916385936224 or 6385936224"
+              className="input w-full mb-4"
+              onKeyDown={e => { if (e.key === 'Enter') handleTestSms() }}
+            />
+
+            <div className="flex gap-3">
+              <button
+                id="btn-test-sms-send"
+                onClick={handleTestSms}
+                disabled={smsSending || !smsPhone.trim()}
+                className="btn btn-primary flex-1 flex items-center justify-center gap-2"
+              >
+                <Send size={14} />
+                {smsSending ? 'Sending…' : gsmLive ? 'Send SMS' : 'Log Mock SMS'}
+              </button>
+              <button
+                onClick={() => setSmsModal(false)}
+                className="btn btn-ghost"
+              >
+                Cancel
+              </button>
+            </div>
+
+            {!gsmLive && (
+              <p className="text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 mt-3">
+                ⚠ No modem detected. SMS will be logged server-side only.
+                Plug in the GSM dongle and restart to send real messages.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
     </>

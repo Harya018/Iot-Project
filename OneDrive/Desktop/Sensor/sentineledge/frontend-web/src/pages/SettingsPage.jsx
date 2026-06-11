@@ -3,7 +3,7 @@
  * Threshold config, demo controls (CSV playback), and admin info.
  */
 import { useState, useEffect, useCallback } from 'react'
-import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone } from 'lucide-react'
+import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle } from 'lucide-react'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
   simulateBreach, createBackup, fetchHealth,
@@ -11,6 +11,7 @@ import {
 import { utcToIST } from '../utils/time.js'
 import Badge from '../components/shared/Badge.jsx'
 import { useToast, ToastContainer } from '../components/shared/Toast.jsx'
+import PasswordConfirmModal from '../components/PasswordConfirmModal.jsx'
 
 // ─── API helpers for new simulate endpoints ───────────────────────────────────
 const simulateDemo  = (speed) => fetch('/api/simulate/demo',  {
@@ -68,6 +69,17 @@ export default function SettingsPage() {
   const [testingSms,     setTestingSms]     = useState(false)
   const [testSmsMsg,     setTestSmsMsg]     = useState(null)
 
+  // ── Add Parameter state ──────────────────────────────────────────────────────
+  const [paramName,  setParamName]  = useState('')
+  const [paramUnit,  setParamUnit]  = useState('')
+  const [paramMin,   setParamMin]   = useState('')
+  const [paramMax,   setParamMax]   = useState('')
+  const [paramSaved, setParamSaved] = useState(false)
+
+  // ── Password Confirm Modal state (for threshold changes) ─────────────────────
+  const [pwdAction,  setPwdAction]  = useState(null)  // 'update' | 'reset' | null
+  const [pwdError,   setPwdError]   = useState(null)
+
   // ── Load data ────────────────────────────────────────────────────────────────
   const loadThresholds = useCallback(async () => {
     try {
@@ -96,24 +108,48 @@ export default function SettingsPage() {
       setThreshMsg({ type:'error', text:'High must be greater than low.' })
       return
     }
-    setSaving(true); setThreshMsg(null)
-    try {
-      await updateThresholds({ temp_high: Number(high), temp_low: Number(low) })
-      setThreshMsg({ type:'success', text:'Thresholds updated.' })
-      loadThresholds()
-    } catch (err) { setThreshMsg({ type:'error', text: err.message }) }
-    finally { setSaving(false) }
+    // Gate behind password modal
+    setPwdAction('update')
+    setPwdError(null)
   }
 
-  const handleReset = async () => {
-    if (!confirm('Reset to defaults (90°C / 38°C)?')) return
+  const doUpdate = async (password) => {
+    setSaving(true); setThreshMsg(null)
+    try {
+      await updateThresholds({ temp_high: Number(high), temp_low: Number(low) }, password)
+      setThreshMsg({ type:'success', text:'Thresholds updated.' })
+      setPwdAction(null)
+      loadThresholds()
+    } catch (err) {
+      if (err.message?.includes('401')) { setPwdError('Incorrect password'); return }
+      setThreshMsg({ type:'error', text: err.message })
+      setPwdAction(null)
+    } finally { setSaving(false) }
+  }
+
+  const handleReset = () => {
+    setPwdAction('reset')
+    setPwdError(null)
+  }
+
+  const doReset = async (password) => {
     setResetting(true); setThreshMsg(null)
     try {
-      await resetThresholds()
-      setThreshMsg({ type:'success', text:'Reset to defaults (90°C / 38°C).' })
+      await resetThresholds(password)
+      setThreshMsg({ type:'success', text:'Reset to defaults (90°C / 42°C).' })
+      setPwdAction(null)
       loadThresholds()
-    } catch (err) { setThreshMsg({ type:'error', text: err.message }) }
-    finally { setResetting(false) }
+    } catch (err) {
+      if (err.message?.includes('401')) { setPwdError('Incorrect password'); return }
+      setThreshMsg({ type:'error', text: err.message })
+      setPwdAction(null)
+    } finally { setResetting(false) }
+  }
+
+  const handlePasswordConfirm = (password) => {
+    setPwdError(null)
+    if (pwdAction === 'update') doUpdate(password)
+    if (pwdAction === 'reset')  doReset(password)
   }
 
   // ── Demo handlers ─────────────────────────────────────────────────────────────
@@ -585,7 +621,131 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* ── Section 5: Admin Info ───────────────────────────────────────── */}
+        {/* ── Section 5: Add Parameter ──────────────────────────────────────── */}
+        <Section title="Add Parameter" icon={PlusCircle}>
+          <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 20, marginTop: -4 }}>
+            Define a new sensor metric to monitor. This will appear as a live card on the Dashboard.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            {/* Parameter Name */}
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                Parameter Name
+              </label>
+              <input
+                id="param-name"
+                value={paramName}
+                onChange={e => setParamName(e.target.value)}
+                placeholder="e.g. Pressure"
+                style={{
+                  width: '100%', padding: '9px 12px', borderRadius: 8,
+                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
+                  outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            {/* Unit */}
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                Unit
+              </label>
+              <input
+                id="param-unit"
+                value={paramUnit}
+                onChange={e => setParamUnit(e.target.value)}
+                placeholder="e.g. bar, %, mm/s"
+                style={{
+                  width: '100%', padding: '9px 12px', borderRadius: 8,
+                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
+                  outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            {/* Min Value */}
+            <div>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                Min Value
+              </label>
+              <input
+                id="param-min"
+                type="number"
+                value={paramMin}
+                onChange={e => setParamMin(e.target.value)}
+                placeholder="e.g. 0.0"
+                style={{
+                  width: '100%', padding: '9px 12px', borderRadius: 8,
+                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
+                  outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            {/* Max Value */}
+            <div>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                Max Value
+              </label>
+              <input
+                id="param-max"
+                type="number"
+                value={paramMax}
+                onChange={e => setParamMax(e.target.value)}
+                placeholder="e.g. 10.0"
+                style={{
+                  width: '100%', padding: '9px 12px', borderRadius: 8,
+                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
+                  outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Save button + feedback */}
+          <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button
+              id="save-parameter-btn"
+              onClick={() => {
+                if (!paramName.trim() || !paramUnit.trim()) {
+                  addToast({ type: 'warning', message: 'Parameter Name and Unit are required.' })
+                  return
+                }
+                addToast({
+                  type: 'success',
+                  message: `Parameter "${paramName}" (${paramUnit}) saved! Backend integration coming soon.`,
+                })
+                setParamSaved(true)
+                setParamName(''); setParamUnit(''); setParamMin(''); setParamMax('')
+                setTimeout(() => setParamSaved(false), 3000)
+              }}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '9px 20px', borderRadius: 8, border: 'none',
+                background: '#7C3AED', color: '#fff',
+                fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                transition: 'background 0.15s',
+              }}
+            >
+              <PlusCircle size={15} />
+              Save Parameter
+            </button>
+            {paramSaved && (
+              <span style={{ fontSize: 12, color: '#10B981', fontWeight: 600 }}>
+                ✓ Saved!
+              </span>
+            )}
+          </div>
+
+          {/* Info note */}
+          <div
+            style={{
+              marginTop: 16, padding: '10px 14px', borderRadius: 8,
+              background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, color: '#065F46',
+            }}
+          >
+            💡 Saved parameters will appear as live sensor cards on the Dashboard once backend integration is complete.
+          </div>
+        </Section>
+
+        {/* ── Section 6: Admin Info ───────────────────────────────────────── */}
         <Section title="Admin Info" icon={Info}>
           <div className="space-y-3">
             {[
@@ -610,6 +770,15 @@ export default function SettingsPage() {
       </div>
 
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
+
+      {/* ── Password Confirm Modal (threshold changes) ─────────────────────── */}
+      <PasswordConfirmModal
+        isOpen={!!pwdAction}
+        actionLabel={pwdAction === 'update' ? 'update thresholds' : 'reset thresholds to defaults'}
+        onConfirm={handlePasswordConfirm}
+        onCancel={() => { setPwdAction(null); setPwdError(null) }}
+        error={pwdError}
+      />
     </>
   )
 }

@@ -8,7 +8,7 @@ Endpoints:
     GET /api/events?limit=100&type=all
 """
 
-from __future__ import annotations
+
 
 from fastapi import APIRouter, Depends, Query
 from pathlib import Path

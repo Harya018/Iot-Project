@@ -6,6 +6,10 @@ RUNTIME_THRESHOLDS is a mutable dict updated at runtime without restart.
 MODULE_STATUS tracks per-module health for the /api/health endpoint.
 
 Alert modules: In-app WebSocket, Email (SMTP), SMS (Android Gateway).
+
+Sensor modes:
+  DEMO_MODE=true  → CSVSensorPlayer (CSV file playback, no hardware needed)
+  DEMO_MODE=false → SerialSensorReader (live USB temp sensor via SENSOR_PORT)
 """
 
 import os
@@ -22,9 +26,9 @@ load_dotenv(dotenv_path=os.path.join(_root, f".env.{APP_ENV}"))
 # ── Threshold defaults ────────────────────────────────────────────────────────
 # Industrial cooling process:
 #   HIGH = 90.0°C  — overheating danger
-#   LOW  = 40.0°C  — machine cooled and ready for next process
+#   LOW  = 42.0°C  — machine cooled and ready for next process
 TEMP_THRESHOLD_HIGH: float = float(os.getenv("TEMP_THRESHOLD_HIGH", "90.0"))
-TEMP_THRESHOLD_LOW: float  = float(os.getenv("TEMP_THRESHOLD_LOW",  "40.0"))
+TEMP_THRESHOLD_LOW: float  = float(os.getenv("TEMP_THRESHOLD_LOW",  "42.0"))
 
 # ── SMTP ──────────────────────────────────────────────────────────────────────
 SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -49,7 +53,7 @@ SMS_GAMMU_BAUD: int  = int(os.getenv("SMS_GAMMU_BAUD", "9600"))
 # ── Escalation / Cooldown ─────────────────────────────────────────────────────
 ESCALATION_TIMEOUT_SECONDS: int = int(os.getenv("ESCALATION_TIMEOUT_SECONDS", "60"))
 DEMO_ESCALATION_TIMEOUT: int     = int(os.getenv("DEMO_ESCALATION_TIMEOUT", "15"))
-ALERT_COOLDOWN_SECONDS: int      = int(os.getenv("ALERT_COOLDOWN_SECONDS", "120"))
+ALERT_COOLDOWN_SECONDS: int      = int(os.getenv("ALERT_COOLDOWN_SECONDS", "10"))
 
 # ── VAPID (Web Push) ──────────────────────────────────────────────────────────
 VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")
@@ -63,8 +67,15 @@ SERVER_PORT: int = int(os.getenv("SERVER_PORT", "5000"))
 # ── Demo mode ─────────────────────────────────────────────────────────────────
 DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
 
-# ── Admin password ────────────────────────────────────────────────────────────
+# ── USB Temperature Sensor (Serial/COM port) ──────────────────────────────────
+# Only used when DEMO_MODE=false. Set to the COM port of the USB sensor.
+# Windows: COM3, COM4, etc.   Linux: /dev/ttyUSB0, /dev/ttyACM0
+SENSOR_PORT: str = os.getenv("SENSOR_PORT", "COM3")
+SENSOR_BAUD: int = int(os.getenv("SENSOR_BAUD", "9600"))
+
+# ── Admin credentials ─────────────────────────────────────────────────────────
 ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "sentineledge-admin")
+ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
 
 # ── Runtime-mutable thresholds ────────────────────────────────────────────────
 # Updated via POST /api/config/thresholds without restarting the server.

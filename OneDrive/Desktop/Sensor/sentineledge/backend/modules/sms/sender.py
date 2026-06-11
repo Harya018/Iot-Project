@@ -21,11 +21,104 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 
-from config import SMS_METHOD
+from config import SMS_METHOD, SMS_GAMMU_PORT
 from utils.logger import get_logger
 
 logger = get_logger("sms.sender")
+
+# ─── GSM Modem detection & mock mode ─────────────────────────────────────────
+# When SMS_METHOD=gammu and no physical modem is attached, the module switches
+# to MOCK MODE automatically — logging the SMS instead of crashing.
+
+_modem_port: Optional[str] = None   # detected/configured COM port, or None
+_mock_mode:  bool          = True   # True until a modem is confirmed present
+
+
+def detect_gsm_modem() -> Optional[str]:
+    """
+    Scan for an attached GSM modem.
+
+    Strategy:
+      1. If SMS_GAMMU_PORT is set in config, verify it exists in the port list.
+      2. Otherwise scan all COM ports for GSM-related descriptions.
+
+    Returns the port string (e.g. 'COM3') or None if nothing found.
+    Never raises.
+    """
+    try:
+        import serial.tools.list_ports  # type: ignore
+    except ImportError:
+        logger.warning("pyserial not installed — cannot scan for GSM modem")
+        return None
+
+    try:
+        available = {p.device: p for p in serial.tools.list_ports.comports()}
+    except Exception as exc:
+        logger.warning("COM port scan failed: %s", exc)
+        return None
+
+    # ── Strategy 1: use hardcoded config port if it shows up ─────────────────
+    if SMS_GAMMU_PORT and SMS_GAMMU_PORT in available:
+        logger.debug("Config port %s is present in system", SMS_GAMMU_PORT)
+        return SMS_GAMMU_PORT
+
+    # ── Strategy 2: keyword scan across all ports ─────────────────────────────
+    GSM_KEYWORDS = (
+        "modem", "gsm", "sim", "huawei", "sierra", "zte",
+        "quectel", "simcom", "usb serial", "at command",
+    )
+    for port, info in available.items():
+        desc = (info.description or "").lower()
+        mfr  = (getattr(info, "manufacturer", None) or "").lower()
+        if any(kw in desc or kw in mfr for kw in GSM_KEYWORDS):
+            logger.debug("GSM modem auto-detected on %s (%s)", port, info.description)
+            return port
+
+    return None
+
+
+def initialize_gsm_modem() -> None:
+    """
+    Detect the GSM modem and set mock mode accordingly.
+    Called once at server startup (inside start_gsm_worker).
+    """
+    global _modem_port, _mock_mode
+
+    method = (SMS_METHOD or "adb").lower().strip()
+    if method != "gammu":
+        # Only gammu uses a physical serial modem — other methods are always live
+        _mock_mode  = False
+        _modem_port = None
+        logger.debug("GSM modem init skipped — SMS_METHOD=%s (not gammu)", SMS_METHOD)
+        return
+
+    _modem_port = detect_gsm_modem()
+
+    if _modem_port:
+        _mock_mode = False
+        logger.info(
+            "GSM modem detected on %s — LIVE MODE active",
+            _modem_port,
+        )
+    else:
+        _mock_mode = True
+        logger.warning(
+            "GSM modem NOT detected — running in MOCK MODE. "
+            "SMS will be logged but NOT sent. "
+            "Plug in the GSM dongle and restart the server to enable real SMS."
+        )
+
+
+def _mock_send_sms(phone: str, message: str) -> bool:
+    """Log a simulated SMS send when running in mock mode."""
+    preview = message[:50] + ("..." if len(message) > 50 else "")
+    logger.info(
+        "[MOCK SMS] To: %s | Message: %s | Status: SIMULATED (no modem connected)",
+        phone, preview,
+    )
+    return True  # treat as success so receipts aren't spammed with failures
 
 # IST = UTC + 05:30
 _IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -211,3 +304,209 @@ async def send_alert_sms_async(
         send_alert_sms,
         phone, value, threshold, direction, timestamp_utc,
     )
+
+
+# ─── GSM Queue Worker (parallel-safe serial access) ──────────────────────────
+# The GSM dongle uses a SINGLE serial port — it cannot be shared across threads.
+# Solution: one background worker thread owns the port exclusively and drains
+# an asyncio-safe queue. Callers push jobs simultaneously; the worker sends
+# them as fast as the modem hardware allows (~2-5s per SMS).
+
+import queue as _queue
+import threading as _threading
+
+_sms_queue: _queue.Queue = _queue.Queue()
+_worker_thread: _threading.Thread | None = None
+_worker_running: bool = False
+
+
+def _gsm_worker() -> None:
+    """
+    Single worker thread that owns the GSM serial port and drains the queue.
+    Each job is a tuple: (phone: str, message: str, result_holder: dict).
+    result_holder is mutated in-place so the caller can inspect the outcome.
+    Respects _mock_mode — in mock mode no serial port is touched.
+    """
+    global _worker_running
+    _worker_running = True
+    logger.info("GSM SMS queue worker started")
+
+    while _worker_running:
+        try:
+            job = _sms_queue.get(timeout=1.0)
+        except _queue.Empty:
+            continue
+
+        if job is None:          # shutdown sentinel
+            _sms_queue.task_done()
+            break
+
+        phone, message, result_holder = job
+        try:
+            method = (SMS_METHOD or "adb").lower().strip()
+
+            # ── Mock mode: log and return success without touching serial port ──
+            if method == "gammu" and _mock_mode:
+                ok = _mock_send_sms(phone, message)
+                result_holder["status"] = "mock_sent"
+                result_holder["mock"]   = True
+            else:
+                ok = send_sms(phone, message)
+                result_holder["status"] = "sent" if ok else "failed"
+                if ok:
+                    logger.info("GSM queue: SMS sent to %s", phone)
+                else:
+                    result_holder["error"] = "send_sms returned False"
+                    logger.warning("GSM queue: SMS failed to %s", phone)
+        except Exception as exc:
+            result_holder["status"] = "failed"
+            result_holder["error"] = str(exc)
+            logger.error("GSM queue: SMS error to %s: %s", phone, exc)
+        finally:
+            _sms_queue.task_done()
+
+    _worker_running = False
+    logger.info("GSM SMS queue worker stopped")
+
+
+def start_gsm_worker() -> None:
+    """
+    Start the GSM SMS queue worker thread (call once at server startup).
+    Runs modem detection first to set live vs. mock mode.
+    Safe to call multiple times — only starts one thread.
+    """
+    global _worker_thread
+    if _worker_thread is not None and _worker_thread.is_alive():
+        logger.debug("GSM SMS worker already running — skipping start")
+        return
+    # Detect modem and set mock mode before starting the worker thread
+    initialize_gsm_modem()
+    _worker_thread = _threading.Thread(
+        target=_gsm_worker, daemon=True, name="gsm-sms-worker"
+    )
+    _worker_thread.start()
+    logger.info("GSM SMS worker thread started (thread id: %s)", _worker_thread.ident)
+
+
+def stop_gsm_worker() -> None:
+    """
+    Gracefully stop the GSM SMS queue worker (call at server shutdown).
+    Sends a None sentinel to wake the worker and exit its loop.
+    """
+    global _worker_running
+    _worker_running = False
+    _sms_queue.put(None)     # sentinel — wakes the worker to stop
+    logger.info("GSM SMS worker stop signal sent")
+
+
+async def send_sms_to_all(
+    subscribers: list,
+    value: float,
+    threshold: float,
+    direction: str,
+    timestamp_utc: str,
+) -> list:
+    """
+    Queue SMS alerts for ALL active subscribers simultaneously.
+
+    For the GSM dongle (SMS_METHOD=gammu), jobs are pushed to the queue at once
+    and the single worker drains them as fast as the hardware allows.
+    For ADB / gateway, each SMS is dispatched via run_in_executor concurrently.
+
+    Parameters
+    ----------
+    subscribers   : list of subscriber dicts (must have 'phone' and
+                    'is_active'/'active' keys)
+    value         : float — sensor reading
+    threshold     : float — breached threshold
+    direction     : str   — "low" | "high"
+    timestamp_utc : str   — UTC ISO 8601 timestamp
+
+    Returns
+    -------
+    list of dicts: [{"to": phone, "status": "queued"|"sent"|"failed", "error": str|None}, ...]
+    """
+    method = (SMS_METHOD or "adb").lower().strip()
+
+    targets = [
+        s for s in subscribers
+        if s.get("phone") and bool(s.get("is_active", s.get("active", True)))
+    ]
+
+    if not targets:
+        logger.warning("send_sms_to_all: no active subscribers with phone")
+        return []
+
+    message = build_sms_message(value, threshold, direction, timestamp_utc)
+
+    # ── GSM dongle path: use the queue worker ─────────────────────────────────
+    if method == "gammu":
+        results: list[dict] = []
+        for sub in targets:
+            holder: dict = {"to": sub["phone"], "status": "queued", "error": None}
+            _sms_queue.put((sub["phone"], message, holder))
+            results.append(holder)
+
+        logger.info(
+            "SMS batch: queued %d messages for GSM worker (method=gammu)",
+            len(results),
+        )
+
+        # Wait for all queued jobs to finish (non-blocking via executor)
+        timeout = len(results) * 15 + 30   # 15s per SMS + 30s buffer
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: _sms_queue.join(),
+            )
+        except Exception as exc:
+            logger.error("SMS batch join error: %s", exc)
+
+        sent   = sum(1 for r in results if r["status"] == "sent")
+        failed = sum(1 for r in results if r["status"] == "failed")
+        logger.info(
+            "SMS batch complete (gammu): %d sent, %d failed (of %d)",
+            sent, failed, len(targets),
+        )
+        return results
+
+    # ── ADB / gateway path: concurrent via executor ───────────────────────────
+    # These transports do NOT share a physical port — safe to call concurrently.
+    async def _send_one(sub: dict) -> dict:
+        holder: dict = {"to": sub["phone"], "status": "unknown", "error": None}
+        try:
+            ok = await send_alert_sms_async(
+                phone=sub["phone"],
+                value=value,
+                threshold=threshold,
+                direction=direction,
+                timestamp_utc=timestamp_utc,
+            )
+            holder["status"] = "sent" if ok else "failed"
+            if not ok:
+                holder["error"] = "send_sms returned False"
+        except Exception as exc:
+            holder["status"] = "failed"
+            holder["error"] = str(exc)
+            logger.error("SMS batch (%s): failed to %s: %s", method, sub["phone"], exc)
+        return holder
+
+    raw = await asyncio.gather(
+        *[_send_one(sub) for sub in targets],
+        return_exceptions=True,
+    )
+    results = []
+    for sub, res in zip(targets, raw):
+        if isinstance(res, Exception):
+            results.append({"to": sub["phone"], "status": "failed", "error": str(res)})
+        else:
+            results.append(res)
+
+    sent   = sum(1 for r in results if r["status"] == "sent")
+    failed = sum(1 for r in results if r["status"] == "failed")
+    logger.info(
+        "SMS batch complete (%s): %d sent, %d failed (of %d)",
+        method, sent, failed, len(targets),
+    )
+    return results

@@ -2,22 +2,24 @@
 routers/admin.py — Admin-only endpoints.
 
 Tags: Admin
-All endpoints require X-Admin-Password header.
+All endpoints require X-Admin-Password header or Bearer session token.
 
-Endpoints:
-    GET  /api/admin/config-changes    — config audit log
-    GET  /api/admin/backups           — list database backups
-    POST /api/admin/backup            — trigger immediate backup
-    GET  /api/admin/database/stats    — database size and row counts
+Changes in this version:
+  - POST /api/admin/login uses database.create_session() (PostgreSQL-backed)
+  - _login_sessions in-memory dict removed entirely
+  - Session TTL: 8 hours (not 24)
+  - POST /api/admin/login rate limited to 10/minute (brute-force protection)
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 
 import database
 from config import ADMIN_PASSWORD, SMTP_USER
 from middleware.auth import require_admin
+from middleware.rate_limit import limiter
 from models import ConfigChangeOut
 from database.backup import create_backup, get_backup_list
 from database.retention import get_database_stats
@@ -28,6 +30,31 @@ from utils.time import now_iso
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api", tags=["Admin"])
+
+
+# ─── Acknowledgement Log ──────────────────────────────────────────────────────
+
+@router.get(
+    "/ack-log",
+    summary="Acknowledgement log",
+    description=(
+        "Returns acknowledged alerts with who acknowledged, when, and "
+        "response_time_seconds (time between alert firing and acknowledgement). "
+        "Requires admin auth."
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def get_ack_log(limit: int = 100):
+    """Return the acknowledgement log with response time in seconds."""
+    try:
+        rows = database.get_ack_log(limit=limit)
+        return rows
+    except Exception as exc:
+        logger.error("get_ack_log failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to fetch ack log", "detail": str(exc)},
+        )
 
 
 class _VerifyIn(BaseModel):
@@ -44,6 +71,311 @@ async def verify_password(body: _VerifyIn):
     """Used by the frontend admin modal to verify the password on first entry."""
     return {"valid": body.password == ADMIN_PASSWORD}
 
+
+# ─── Admin Profile (GET + PATCH username/PIN) ─────────────────────────────────
+
+class _ProfileUpdateIn(BaseModel):
+    current_pin: str
+    new_username: Optional[str] = None
+    new_pin:      Optional[str] = None
+
+
+@router.get(
+    "/admin/profile",
+    summary="Get admin profile",
+    description="Returns current admin username. Requires admin auth.",
+    dependencies=[Depends(require_admin)],
+)
+async def get_admin_profile():
+    """Return the current admin's public profile (PIN never returned)."""
+    import config as _cfg
+    username = getattr(_cfg, "ADMIN_USERNAME", "admin")
+    return {"username": username}
+
+
+@router.patch(
+    "/admin/profile",
+    summary="Update admin profile",
+    description="Update username/PIN for the main admin. current_pin must match. On success all sessions invalidated.",
+    dependencies=[Depends(require_admin)],
+)
+async def update_admin_profile(body: _ProfileUpdateIn):
+    """Change admin username and/or PIN. Invalidates all DB sessions on success."""
+    import re as _re
+    import os as _os
+    import config as _cfg
+
+    if body.current_pin != _cfg.ADMIN_PASSWORD:
+        return JSONResponse(status_code=401, content={"detail": "Current PIN is incorrect"})
+
+    new_username = None
+    if body.new_username and body.new_username.strip():
+        uname = body.new_username.strip()
+        if not _re.match(r"^[a-zA-Z0-9_]{3,20}$", uname):
+            return JSONResponse(status_code=422, content={"detail": "Username must be 3-20 chars (letters/digits/underscores)"})
+        new_username = uname
+
+    new_pin = None
+    if body.new_pin and body.new_pin.strip():
+        npin = body.new_pin.strip()
+        if len(npin) < 4 or len(npin) > 20:
+            return JSONResponse(status_code=422, content={"detail": "New PIN must be 4-20 characters"})
+        new_pin = npin
+
+    if not new_username and not new_pin:
+        return JSONResponse(status_code=422, content={"detail": "Provide at least new_username or new_pin"})
+
+    root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
+    env_file = _os.path.join(root, f".env.{_cfg.APP_ENV}")
+    if not _os.path.exists(env_file):
+        env_file = _os.path.join(root, ".env")
+
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            content = f.read()
+        if new_pin:
+            if _re.search(r"^ADMIN_PASSWORD=.*$", content, flags=_re.MULTILINE):
+                content = _re.sub(r"^ADMIN_PASSWORD=.*$", f"ADMIN_PASSWORD={new_pin}", content, flags=_re.MULTILINE)
+            else:
+                content = content.rstrip("\n") + f"\nADMIN_PASSWORD={new_pin}\n"
+        if new_username:
+            if _re.search(r"^ADMIN_USERNAME=.*$", content, flags=_re.MULTILINE):
+                content = _re.sub(r"^ADMIN_USERNAME=.*$", f"ADMIN_USERNAME={new_username}", content, flags=_re.MULTILINE)
+            else:
+                content = content.rstrip("\n") + f"\nADMIN_USERNAME={new_username}\n"
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as exc:
+        logger.error("update_admin_profile write error: %s", exc)
+        return JSONResponse(status_code=500, content={"detail": f"Failed to write .env: {exc}"})
+
+    if new_pin:
+        _cfg.ADMIN_PASSWORD = new_pin
+    if new_username:
+        _cfg.ADMIN_USERNAME = new_username
+
+    # Invalidate ALL sessions in the DB (password changed)
+    try:
+        from database.queries.sessions import cleanup_expired_sessions
+        from database.connection import execute_write
+        execute_write("DELETE FROM admin_sessions")
+        logger.info("Admin profile updated. All DB sessions cleared.")
+    except Exception as exc:
+        logger.warning("Failed to clear DB sessions after profile update: %s", exc)
+
+    return {"message": "Profile updated. Please log in again."}
+
+
+# ─── Username + PIN Login (DB-backed sessions) ────────────────────────────────
+
+class _AdminLoginIn(BaseModel):
+    username: str
+    pin: str
+
+
+@router.post(
+    "/admin/login",
+    summary="Admin dashboard login",
+    description=(
+        "Login to the admin dashboard with username + PIN. "
+        "Returns a Bearer token valid for 8 hours. "
+        "Sessions are stored in PostgreSQL and survive server restarts. "
+        "Rate limited: 10/minute per IP."
+    ),
+)
+@limiter.limit("10/minute")
+async def admin_login(body: _AdminLoginIn, request: Request):
+    """Validate username + PIN and issue a DB-backed Bearer token (8h TTL)."""
+    import secrets
+    from datetime import datetime, timezone, timedelta
+    import config as _cfg
+
+    username = body.username.strip().lower()
+    pin      = body.pin.strip()
+
+    # Validate against runtime ADMIN_USERNAME and ADMIN_PASSWORD
+    stored_username = getattr(_cfg, "ADMIN_USERNAME", "admin").lower()
+    valid = (username == stored_username and pin == _cfg.ADMIN_PASSWORD)
+
+    if not valid:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "InvalidCredentials", "message": "Invalid username or PIN"},
+        )
+
+    actual_username = getattr(_cfg, "ADMIN_USERNAME", "admin")
+    token = secrets.token_hex(32)   # 64-char hex
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
+
+    # Persist session in PostgreSQL (survives server restarts)
+    database.create_session(token, expires_at)
+
+    logger.info("Admin dashboard login: username=%s (session expires in 8h)", actual_username)
+    return {"token": token, "username": actual_username}
+
+
+# ─── Change Admin Password ────────────────────────────────────────────────────
+
+class _ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post(
+    "/admin/change-password",
+    summary="Change admin password",
+    description=(
+        "Validates current_password against ADMIN_PASSWORD, then writes the new "
+        "password to the active .env file and updates the in-memory value — "
+        "no server restart required. Requires admin auth header."
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def change_admin_password(body: _ChangePasswordIn):
+    """Change the admin password in-place without restarting the server."""
+    import re as _re
+    import config as _cfg
+
+    # 1. Verify current password
+    if body.current_password != _cfg.ADMIN_PASSWORD:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Current password is incorrect"},
+        )
+
+    # 2. Validate new password
+    new_pwd = body.new_password.strip()
+    if len(new_pwd) < 6:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "New password must be at least 6 characters"},
+        )
+
+    # 3. Locate the active .env file
+    import os as _os
+    root = _os.path.abspath(
+        _os.path.join(_os.path.dirname(__file__), "..", "..")
+    )
+    env_file = _os.path.join(root, f".env.{_cfg.APP_ENV}")
+    if not _os.path.exists(env_file):
+        env_file = _os.path.join(root, ".env")
+
+    # 4. Rewrite ADMIN_PASSWORD line in the .env file
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if _re.search(r"^ADMIN_PASSWORD=.*$", content, flags=_re.MULTILINE):
+            new_content = _re.sub(
+                r"^ADMIN_PASSWORD=.*$",
+                f"ADMIN_PASSWORD={new_pwd}",
+                content,
+                flags=_re.MULTILINE,
+            )
+        else:
+            new_content = content.rstrip("\n") + f"\nADMIN_PASSWORD={new_pwd}\n"
+
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+    except Exception as exc:
+        logger.error("change_admin_password: failed to write .env: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Failed to write .env file", "detail": str(exc)},
+        )
+
+    # 5. Update in-memory value — no restart needed
+    _cfg.ADMIN_PASSWORD = new_pwd
+
+    # 6. Invalidate all DB sessions (password changed — everyone must re-login)
+    try:
+        from database.connection import execute_write
+        execute_write("DELETE FROM admin_sessions")
+        logger.info("All admin sessions cleared after password change.")
+    except Exception as exc:
+        logger.warning("Failed to clear DB sessions after password change: %s", exc)
+
+    logger.info("Admin password changed successfully (env: %s)", env_file)
+    return {"status": "changed", "message": "Password updated successfully. All sessions have been invalidated."}
+
+
+# ─── Sub-Admin Management ─────────────────────────────────────────────────────
+
+class _CreateAdminIn(BaseModel):
+    name: str
+    password: str
+
+
+class _UpdateAdminPwdIn(BaseModel):
+    new_password: str
+
+
+@router.get(
+    "/admin/admins",
+    summary="List all admin accounts",
+    description="Returns all main and sub-admin accounts. Requires admin auth.",
+    dependencies=[Depends(require_admin)],
+)
+async def list_admins():
+    """List all admin accounts (no password hashes returned)."""
+    return database.get_all_admins()
+
+
+@router.post(
+    "/admin/admins",
+    summary="Create a sub-admin",
+    description="Creates a new sub-admin account. Only the main admin can call this.",
+    dependencies=[Depends(require_admin)],
+)
+async def create_sub_admin(body: _CreateAdminIn):
+    """Create a new sub-admin."""
+    name = body.name.strip()
+    if len(name) < 2:
+        return JSONResponse(status_code=422, content={"error": "name must be at least 2 characters"})
+    if len(body.password) < 6:
+        return JSONResponse(status_code=422, content={"error": "password must be at least 6 characters"})
+    admin_id = database.create_admin(name, body.password, role="sub")
+    if admin_id is None:
+        return JSONResponse(status_code=409, content={"error": f"Admin '{name}' already exists"})
+    logger.info("Sub-admin created: name=%s id=%d", name, admin_id)
+    return {"status": "created", "admin_id": admin_id, "name": name, "role": "sub"}
+
+
+@router.delete(
+    "/admin/admins/{admin_id}",
+    summary="Delete a sub-admin",
+    description="Deletes a sub-admin by id. Main admin cannot be deleted.",
+    dependencies=[Depends(require_admin)],
+)
+async def delete_sub_admin(admin_id: int):
+    """Delete a sub-admin account."""
+    admin = database.get_admin_by_id(admin_id)
+    if not admin:
+        return JSONResponse(status_code=404, content={"error": "Admin not found"})
+    if admin.get("role") == "main":
+        return JSONResponse(status_code=403, content={"error": "Cannot delete the main admin"})
+    database.delete_admin(admin_id)
+    logger.info("Sub-admin deleted: id=%d name=%s", admin_id, admin.get("name"))
+    return {"status": "deleted", "admin_id": admin_id}
+
+
+@router.put(
+    "/admin/admins/{admin_id}/password",
+    summary="Change sub-admin password",
+    description="Update a sub-admin's password. Requires main admin auth.",
+    dependencies=[Depends(require_admin)],
+)
+async def update_sub_admin_password(admin_id: int, body: _UpdateAdminPwdIn):
+    """Change the password for a sub-admin."""
+    admin = database.get_admin_by_id(admin_id)
+    if not admin:
+        return JSONResponse(status_code=404, content={"error": "Admin not found"})
+    if len(body.new_password) < 6:
+        return JSONResponse(status_code=422, content={"error": "password must be at least 6 characters"})
+    database.update_admin_password(admin_id, body.new_password)
+    logger.info("Sub-admin password updated: id=%d", admin_id)
+    return {"status": "updated", "admin_id": admin_id}
 
 
 @router.get(
@@ -71,7 +403,7 @@ async def get_config_changes():
 @router.get(
     "/admin/backups",
     summary="List database backups",
-    description="Returns metadata for all available database backup files.",
+    description="Returns metadata for all available database backup files (.sql dumps).",
     dependencies=[Depends(require_admin)],
 )
 async def list_backups():
@@ -93,7 +425,7 @@ async def list_backups():
 @router.post(
     "/admin/backup",
     summary="Trigger immediate backup",
-    description="Creates a timestamped database backup right now.",
+    description="Creates a timestamped pg_dump .sql backup right now.",
     dependencies=[Depends(require_admin)],
 )
 async def trigger_backup():
@@ -109,7 +441,7 @@ async def trigger_backup():
         latest = backups[0] if backups else {}
         return {
             "status":    "success",
-            "filename":  latest.get("filename", "backup.db"),
+            "filename":  latest.get("filename", "backup.sql"),
             "size_mb":   latest.get("size_mb", 0),
             "timestamp": now_iso(),
         }
@@ -125,7 +457,7 @@ async def trigger_backup():
     "/admin/database/stats",
     summary="Database statistics",
     description=(
-        "Returns row counts, database file size, oldest reading, "
+        "Returns row counts, database size (via pg_database_size()), oldest reading, "
         "and number of available backups."
     ),
     dependencies=[Depends(require_admin)],
@@ -186,6 +518,7 @@ async def import_csv(body: _ImportCsvIn):
             content={"error": "Import failed", "detail": str(exc)},
         )
 
+
 class _TestEmailIn(BaseModel):
     email: str
 
@@ -201,20 +534,20 @@ class _TestEmailIn(BaseModel):
     dependencies=[Depends(require_admin)],
 )
 async def test_email(body: _TestEmailIn):
-    """Send a test HTML email to verify the Module 2 template."""
+    """Send a test HTML email to verify the email template."""
     import asyncio
     try:
         ok = await asyncio.get_event_loop().run_in_executor(
             None,
             send_alert_email,
-            body.email,          # recipient_email
-            "Test Operator",     # recipient_name
-            37.5,                # temperature
-            38.0,                # threshold
-            "low",               # direction
-            "WARNING",           # severity
-            1,                   # escalation_level
-            now_iso(),           # timestamp_utc
+            body.email,
+            "Test Operator",
+            37.5,
+            38.0,
+            "low",
+            "WARNING",
+            1,
+            now_iso(),
         )
         if ok:
             logger.info("Test email sent to %s", body.email)
@@ -234,51 +567,94 @@ async def test_email(body: _TestEmailIn):
 # ─── Test SMS ─────────────────────────────────────────────────────────────────
 
 class _TestSmsIn(BaseModel):
-    phone: str
+    phone:   str
+    message: Optional[str] = None
 
 
 @router.post(
     "/admin/test-sms",
     summary="Send a test SMS alert",
     description=(
-        "Immediately sends a test SMS to the given phone number using dummy "
-        "low-temperature data (37.5°C below 38.0°C threshold). "
-        "Routes through the configured SMS_METHOD (adb / gammu / gateway). "
+        "Queues a test SMS to the given phone number through the GSM worker "
+        "(same path as real alerts). Works in both LIVE mode (real modem) and "
+        "MOCK mode (no modem — logs the SMS). "
+        "Optional body field 'message' overrides the default test message. "
         "Requires admin auth. Body: {\"phone\": \"6385936224\"}"
     ),
     dependencies=[Depends(require_admin)],
 )
 async def test_sms(body: _TestSmsIn):
-    """Send a test SMS to verify Module 3 (ADB/Gammu/Gateway transport)."""
+    """Send a test SMS via the GSM queue worker."""
     from config import SMS_METHOD
-    from modules.sms.sender import build_sms_message, send_sms
+    from modules.sms.sender import (
+        _mock_mode, _modem_port,
+        _sms_queue,
+        build_sms_message,
+        send_sms,
+    )
+    import asyncio, time
+
+    DEFAULT_MSG = "SentinelEdge Test: SMS delivery confirmed. System is working."
+
     try:
-        ts = now_iso()
-        message = build_sms_message(
-            value=37.5,
-            threshold=38.0,
-            direction="low",
-            timestamp_utc=ts,
-        )
+        method  = (SMS_METHOD or "adb").lower().strip()
+        is_mock = _mock_mode and method == "gammu"
+        mode    = "mock" if is_mock else "live"
+
+        if body.message:
+            message = body.message[:160]
+        else:
+            ts      = now_iso()
+            message = build_sms_message(
+                value=37.5, threshold=38.0, direction="low", timestamp_utc=ts,
+            )
+
+        # gammu path: push through the queue worker
+        if method == "gammu":
+            result_holder: dict = {"to": body.phone, "status": "queued", "error": None}
+            _sms_queue.put((body.phone, message, result_holder))
+            logger.info("Test SMS queued to %s (mode=%s)", body.phone, mode)
+
+            loop = asyncio.get_event_loop()
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, _sms_queue.join),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                pass
+
+            final_status = result_holder.get("status", "queued")
+            return {
+                "status":  final_status,
+                "phone":   body.phone,
+                "mode":    mode,
+                "port":    _modem_port or "not detected",
+                "message": "SMS queued for delivery" if is_mock
+                           else "SMS sent — check your phone",
+            }
+
+        # adb / gateway path: direct send
         ok = send_sms(body.phone, message)
         if ok:
             logger.info("Test SMS sent to %s via %s", body.phone, SMS_METHOD)
             return {
                 "status":  "sent",
                 "phone":   body.phone,
+                "mode":    "live",
                 "method":  SMS_METHOD,
-                "message": message,
-                "chars":   len(message),
+                "message": "SMS sent — check your phone",
             }
         return JSONResponse(
             status_code=500,
             content={
                 "status": "failed",
                 "phone":  body.phone,
-                "method": SMS_METHOD,
-                "error":  "SMS transport returned False — check server logs for details",
+                "mode":   mode,
+                "error":  "SMS transport returned False — check server logs",
             },
         )
+
     except Exception as exc:
         logger.error("test_sms failed: %s", exc)
         return JSONResponse(

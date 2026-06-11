@@ -5,37 +5,26 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "dark",
     "splash": {
-      "backgroundColor": "#0f1117",
-      "resizeMode": "contain"
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1E1B4B"
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#0f1117"
-      },
+      "package": "com.sentineledge.app",
+      "usesCleartextTraffic": true,
       "permissions": [
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "WAKE_LOCK",
         "RECEIVE_BOOT_COMPLETED",
-        "VIBRATE",
-        "SCHEDULE_EXACT_ALARM",
-        "USE_EXACT_ALARM"
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "USE_FULL_SCREEN_INTENT",
+        "VIBRATE"
       ]
-    },
-    "ios": {
-      "bundleIdentifier": "com.sentineledge.app",
-      "infoPlist": {
-        "UIBackgroundModes": ["fetch", "remote-notification"]
-      }
     },
     "plugins": [
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/icon.png",
-          "color": "#7c3aed",
-          "sounds": []
-        }
-      ]
+      "expo-notifications"
     ]
   }
 }

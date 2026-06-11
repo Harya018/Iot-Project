@@ -2,18 +2,24 @@
 routers/alerts.py — /api/alerts endpoints.
 
 Tags: Alerts
-Rate limiting: POST /acknowledge → 10 requests/minute per IP
+Rate limiting (slowapi):
+  GET  /api/alerts                    → 60/minute per IP
+  POST /api/alerts/{id}/acknowledge   → 30/minute per IP
+  DELETE /api/alerts                  → admin only, no rate limit
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 import database
 import core.escalation as escalation
-from middleware.rate_limiter import rate_limiter, make_rate_limit_response
+from middleware.auth import require_admin
+from middleware.rate_limit import limiter
 from models import AcknowledgeIn, AlertOut
+from utils.logger import get_logger
 
 router = APIRouter(prefix="/api", tags=["Alerts"])
+logger = get_logger(__name__)
 
 
 def _build_delivery_status(alert_id: int) -> dict:
@@ -35,7 +41,8 @@ def _build_delivery_status(alert_id: int) -> dict:
     summary="Get recent alerts",
     description="Returns the last 50 alerts with delivery status and escalation level.",
 )
-async def get_alerts():
+@limiter.limit("60/minute")
+async def get_alerts(request: Request):
     rows = database.get_recent_alerts(limit=50)
     result = []
     for r in rows:
@@ -66,15 +73,8 @@ async def get_alerts():
     summary="Acknowledge an alert",
     description="Marks the alert as acknowledged and stops further escalation.",
 )
+@limiter.limit("30/minute")
 async def acknowledge_alert(alert_id: int, body: AcknowledgeIn, request: Request):
-    # Rate limit: 10 per minute
-    if not rate_limiter.is_allowed(request.client.host, limit=10, window_seconds=60):
-        return JSONResponse(
-            status_code=429,
-            content=make_rate_limit_response(60),
-            headers={"Retry-After": "60"},
-        )
-
     ok = await escalation.acknowledge(alert_id, body.acknowledged_by)
     if not ok:
         raise HTTPException(
@@ -82,3 +82,51 @@ async def acknowledge_alert(alert_id: int, body: AcknowledgeIn, request: Request
             detail=f"Alert {alert_id} not found or already acknowledged",
         )
     return {"status": "acknowledged", "alert_id": alert_id}
+
+
+_VALID_PERIODS = {"1h", "24h", "7d", "30d", "all"}
+
+_PERIOD_LABELS = {
+    "1h":  "the last 1 hour",
+    "24h": "the last 24 hours",
+    "7d":  "the last 7 days",
+    "30d": "the last 30 days",
+    "all": "all time",
+}
+
+
+@router.delete(
+    "/alerts",
+    summary="Delete alerts by time period",
+    description=(
+        "Permanently deletes alerts (and their delivery receipts) for the specified "
+        "period. period must be one of: 1h, 24h, 7d, 30d, all. Requires admin auth."
+    ),
+    dependencies=[Depends(require_admin)],
+)
+async def delete_alerts(
+    period: str = Query(
+        ...,
+        description="Time period to delete: 1h | 24h | 7d | 30d | all",
+    )
+):
+    """Delete alerts by period. Cascades to delivery_receipts."""
+    if period not in _VALID_PERIODS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid period '{period}'. Must be one of: {', '.join(sorted(_VALID_PERIODS))}",
+        )
+
+    try:
+        deleted = database.delete_alerts_by_period(period)
+        label   = _PERIOD_LABELS[period]
+        msg     = f"{deleted} alert{'s' if deleted != 1 else ''} deleted ({label})"
+        logger.info("DELETE /api/alerts: %s", msg)
+        return {
+            "deleted": deleted,
+            "period":  period,
+            "message": msg,
+        }
+    except Exception as exc:
+        logger.error("DELETE /api/alerts failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

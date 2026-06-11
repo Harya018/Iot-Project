@@ -4,52 +4,139 @@ routers/simulate.py — /api/simulate/* endpoints.
 POST /api/simulate/breach  — force a HIGH threshold breach for N ticks (testing)
 POST /api/simulate/demo    — start accelerated CSV playback (demo)
 POST /api/simulate/reset   — stop demo mode, rewind to start of data
+
+Rate limiting (slowapi):
+  POST /api/simulate/breach → 5/minute per IP
+  POST /api/simulate/demo   → 10/minute per IP
 """
 
-from __future__ import annotations
+import asyncio
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import core.sensor as sensor
+import core.threshold as threshold
+import core.escalation as escalation
+import database
 from middleware.auth import require_admin
-from middleware.rate_limiter import rate_limiter, make_rate_limit_response
+from middleware.rate_limit import limiter
+from modules.inapp.manager import broadcast
+from utils.logger import get_logger
+from utils.time import now_iso
+from config import ALERT_COOLDOWN_SECONDS
+
+logger = get_logger("routers.simulate")
 
 router = APIRouter(prefix="/api", tags=["Testing"])
 
 
 # ─── Breach simulation ────────────────────────────────────────────────────────
 
+_BREACH_TEMP   = 92.0   # °C — above the 90.0°C HIGH threshold
+_RECOVERY_TEMP = 55.0   # °C — well above LOW threshold, clears breach state
+
+
+async def _inject_reading(temperature: float, *, label: str = "") -> list:
+    """
+    Inject a synthetic reading DIRECTLY into the pipeline — no spike validation.
+
+    Writes to DB, runs threshold check, broadcasts over WebSocket,
+    fires escalation tasks if any thresholds are breached.
+    Returns the list of BreachEvent objects (may be empty).
+    """
+    reading = {"temperature": temperature, "timestamp": now_iso()}
+
+    # 1. Persist to database (marked valid=True — it's intentional)
+    database.insert_reading(temperature, reading["timestamp"], is_valid=True)
+
+    # 2. Threshold check
+    breaches = threshold.check_threshold(reading)
+
+    # 3. Fire escalation (non-blocking background task)
+    if breaches:
+        asyncio.create_task(
+            escalation.trigger_alert(reading, breaches),
+            name=f"sim-breach-escalation-{label or temperature}",
+        )
+
+    # 4. Update health last_reading
+    try:
+        import routers.health as _health_mod
+        _health_mod.last_reading = {
+            "temperature": reading["temperature"],
+            "timestamp":   reading["timestamp"],
+        }
+    except Exception:
+        pass
+
+    # 5. Broadcast to all WebSocket clients
+    payload = {
+        "temperature": reading["temperature"],
+        "timestamp":   reading["timestamp"],
+        "breaches":    [b.model_dump() for b in breaches],
+        "is_valid":    True,
+    }
+    await broadcast(payload)
+
+    if label:
+        logger.info(
+            "Injected %s reading: %.1f°C — %d breach(es)",
+            label, temperature, len(breaches),
+        )
+    return breaches
+
+
 @router.post(
     "/simulate/breach",
     summary="Simulate a threshold breach",
     description=(
-        "Forces the sensor to emit 10 readings at 92.0°C (above the 90.0°C HIGH "
-        "threshold), triggering the alert pipeline for testing. "
+        "Directly injects a 92.0°C reading into the alert pipeline, "
+        "BYPASSING spike validation (since this is an intentional test trigger). "
+        "Writes to DB, triggers threshold check, broadcasts via WebSocket, "
+        "fires email/SMS/in-app alerts. "
+        "After the configured cooldown, automatically injects a recovery reading. "
         "Requires admin auth. Rate limited to 5/min."
     ),
     dependencies=[Depends(require_admin)],
 )
+@limiter.limit("5/minute")
 async def simulate_breach(request: Request):
-    if not rate_limiter.is_allowed(request.client.host, limit=5, window_seconds=60):
-        return JSONResponse(
-            status_code=429,
-            content=make_rate_limit_response(60),
-            headers={"Retry-After": "60"},
-        )
-    sensor.set_breach_override(ticks=10, value=92.0)
+    # Inject breach reading immediately
+    breaches = await _inject_reading(_BREACH_TEMP, label="breach")
+
+    # Schedule recovery after cooldown (non-blocking)
+    asyncio.create_task(
+        _schedule_recovery(ALERT_COOLDOWN_SECONDS),
+        name="sim-recovery",
+    )
+
+    logger.info(
+        "simulate/breach: injected %.1f°C — %d breach(es) fired, "
+        "recovery scheduled in %ds",
+        _BREACH_TEMP, len(breaches), ALERT_COOLDOWN_SECONDS,
+    )
+
     return {
-        "status":  "activated",
-        "message": "Breach simulation active for next 10 readings (92.0°C)",
-        "ticks":   10,
-        "value":   92.0,
+        "status":              "injected",
+        "message":             f"92.0°C reading injected directly — bypassed spike validator",
+        "temperature":         _BREACH_TEMP,
+        "breaches_fired":      len(breaches),
+        "recovery_in_seconds": ALERT_COOLDOWN_SECONDS,
     }
+
+
+async def _schedule_recovery(wait_seconds: int) -> None:
+    """Wait, then inject a recovery reading so the chart returns to normal."""
+    await asyncio.sleep(wait_seconds)
+    await _inject_reading(_RECOVERY_TEMP, label="recovery")
+    logger.info("Breach simulation recovery complete.")
 
 
 # ─── Demo playback ────────────────────────────────────────────────────────────
 
-class _DemoIn(BaseModel):
+class DemoSpeedIn(BaseModel):
     speed: int = Field(
         default=30,
         ge=1,
@@ -70,17 +157,12 @@ class _DemoIn(BaseModel):
         "Rewinds to the first CSV reading and plays back at the requested speed. "
         "The LOW threshold alert fires when temperature drops below 38.0°C. "
         "speed=30 → ~5 minutes, speed=50 → ~3 minutes. "
-        "Requires admin auth."
+        "Requires admin auth. Rate limited to 10/min."
     ),
     dependencies=[Depends(require_admin)],
 )
-async def simulate_demo(body: _DemoIn, request: Request):
-    if not rate_limiter.is_allowed(request.client.host, limit=10, window_seconds=60):
-        return JSONResponse(
-            status_code=429,
-            content=make_rate_limit_response(60),
-            headers={"Retry-After": "60"},
-        )
+@limiter.limit("10/minute")
+async def simulate_demo(body: DemoSpeedIn, request: Request):
     result = sensor.activate_demo(speed=body.speed)
     return result
 

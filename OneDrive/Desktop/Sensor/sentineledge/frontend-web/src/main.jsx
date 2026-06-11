@@ -1,7 +1,8 @@
 import React, { Component } from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
+import { BrowserRouter, useLocation } from 'react-router-dom'
 import App from './App.jsx'
+import SubAdminApp from './SubAdminApp.jsx'
 import './index.css'
 
 // Root-level error boundary — catches anything App misses
@@ -32,13 +33,18 @@ class RootBoundary extends Component {
   }
 }
 
+/** Route /sub-admin/* to SubAdminApp, everything else to main App */
+function RootRouter() {
+  const loc = useLocation()
+  return loc.pathname.startsWith('/sub-admin') ? <SubAdminApp /> : <App />
+}
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <RootBoundary>
       <BrowserRouter>
-        <App />
+        <RootRouter />
       </BrowserRouter>
     </RootBoundary>
   </React.StrictMode>,
 )
-

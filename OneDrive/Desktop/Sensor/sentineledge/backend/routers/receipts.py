@@ -5,7 +5,7 @@ Endpoints:
     GET /api/receipts?limit=100&channel=all&status=all
 """
 
-from __future__ import annotations
+
 
 from fastapi import APIRouter, Depends, Query
 

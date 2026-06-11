@@ -18,9 +18,11 @@ generated so the system still works during initial setup.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 
-from config import MODULE_STATUS
+from config import MODULE_STATUS, DEMO_MODE, SENSOR_PORT, SENSOR_BAUD
 from utils.time import now_iso
 
 # ─── Data directory ───────────────────────────────────────────────────────────
@@ -135,8 +137,69 @@ class CSVSensorPlayer:
         print("Sensor: reset to normal playback from beginning")
 
 
+# ─── Serial Sensor Reader ─────────────────────────────────────────────────────
+
+class SerialSensorReader:
+    """
+    Reads live temperature data from a USB sensor via COM port.
+    Uses a background thread to read from serial continuously to avoid blocking.
+    """
+
+    def __init__(self) -> None:
+        self.demo_mode:  bool = False
+        self.demo_speed: int  = 1
+        
+        self._latest_temp: float = 65.0
+        self._running: bool = True
+        
+        self._thread = threading.Thread(target=self._read_loop, daemon=True, name="serial-sensor")
+        self._thread.start()
+
+    def _read_loop(self) -> None:
+        """Background thread loop to continuously read from the COM port."""
+        import serial  # type: ignore
+        while self._running:
+            try:
+                with serial.Serial(SENSOR_PORT, SENSOR_BAUD, timeout=1.0) as ser:
+                    print(f"Sensor: Connected to USB sensor on {SENSOR_PORT}")
+                    while self._running:
+                        line = ser.readline()
+                        if not line:
+                            continue
+                        line_str = line.decode('utf-8', errors='ignore').strip()
+                        if not line_str:
+                            continue
+                        try:
+                            temp = float(line_str)
+                            self._latest_temp = temp
+                        except ValueError:
+                            # Malformed/non-numeric data line -> skip silently
+                            pass
+            except serial.SerialException as exc:
+                print(f"Sensor: Serial error on {SENSOR_PORT}: {exc}. Retrying in 5 seconds...")
+                time.sleep(5)
+            except Exception as exc:
+                print(f"Sensor: Unexpected error: {exc}. Retrying in 5 seconds...")
+                time.sleep(5)
+
+    def get_reading(self) -> dict:
+        """Return the latest available temperature reading."""
+        return {"temperature": self._latest_temp, "timestamp": now_iso()}
+
+    def activate_demo(self, speed: int = 30) -> None:
+        """Demo mode has no effect on real serial sensor."""
+        print("Sensor: activate_demo ignored (live USB mode active).")
+        
+    def reset(self) -> None:
+        """Reset has no effect on real serial sensor."""
+        print("Sensor: reset ignored (live USB mode active).")
+
+
 # ─── Singleton instance ───────────────────────────────────────────────────────
-player = CSVSensorPlayer()
+if DEMO_MODE:
+    player = CSVSensorPlayer()
+else:
+    player = SerialSensorReader()
 
 
 # ─── Breach override (for /api/simulate/breach) ───────────────────────────────

@@ -8,7 +8,7 @@ Endpoints:
     GET /api/history/export/readings?start=&end=
 """
 
-from __future__ import annotations
+
 
 import csv
 import io

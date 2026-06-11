@@ -2,7 +2,7 @@
 database/queries/receipts.py — Delivery receipt CRUD.
 
 Tracks sent/failed counts for email and SMS channels.
-Uses execute_write / execute_read so the shared connection is never closed.
+PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
 """
 
 from datetime import datetime, timezone
@@ -30,12 +30,13 @@ def insert_receipt(
             INSERT INTO delivery_receipts
                 (alert_id, channel, subscriber_id, escalation_level,
                  sent_at, success, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (alert_id, channel, subscriber_id, escalation_level,
              ts, int(success), error_message),
         )
-        return cur.lastrowid
+        return cur.lastrowid or -1
     except Exception as exc:
         logger.error("insert_receipt failed: %s", exc)
         return -1
@@ -45,7 +46,7 @@ def get_receipts_for_alert(alert_id: int) -> list[dict]:
     """Return all delivery receipts for a specific alert."""
     try:
         return execute_read(
-            "SELECT * FROM delivery_receipts WHERE alert_id = ? ORDER BY sent_at ASC",
+            "SELECT * FROM delivery_receipts WHERE alert_id = %s ORDER BY sent_at ASC",
             (alert_id,),
         )
     except Exception as exc:
@@ -73,7 +74,7 @@ def get_delivery_stats_today() -> dict:
             """
             SELECT channel, success, COUNT(*) as cnt
             FROM delivery_receipts
-            WHERE sent_at >= ?
+            WHERE sent_at >= %s
             GROUP BY channel, success
             """,
             (today,),
