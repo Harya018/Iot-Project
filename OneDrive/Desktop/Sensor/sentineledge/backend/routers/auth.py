@@ -71,9 +71,15 @@ def _get_valid_token(x_auth_token: str | None) -> dict[str, Any]:
 )
 @limiter.limit("10/minute")
 async def login(body: LoginIn, request: Request) -> LoginOut:
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(f"Login attempt — name: {body.name}, ip: {client_ip}")
+
     subscriber = database.get_subscriber_by_name_and_pin(body.name, body.pin)
     if subscriber is None:
         logger.warning("Failed login attempt for name=%r", body.name)
+        logger.warning(
+            f"Login FAILED — name: {body.name}, ip: {client_ip}"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "InvalidCredentials", "message": "Name or PIN is incorrect"},
@@ -88,6 +94,11 @@ async def login(body: LoginIn, request: Request) -> LoginOut:
         "expires_at":       expires_at,
     }
     logger.info("Login successful for subscriber id=%d name=%r", subscriber["id"], subscriber["name"])
+    logger.info(
+        f"Login SUCCESS — name: {body.name}, "
+        f"ip: {client_ip}, "
+        f"time: {datetime.utcnow().isoformat()}"
+    )
     return LoginOut(
         token=token,
         subscriber_id=subscriber["id"],
