@@ -30,7 +30,7 @@ echo       Disabling monitor timeout on AC power...
 powercfg /change monitor-timeout-ac 0
 echo       OK — Machine will never sleep while plugged in.
 
-echo [4/4] Registering SentinelEdge watchdog as Windows startup task...
+echo [4/5] Registering SentinelEdge watchdog as Windows startup task...
 schtasks /delete /tn "SentinelEdge" /f 2>nul
 schtasks /create /tn "SentinelEdge" ^
   /tr "C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge\start_with_watchdog.bat" ^
@@ -43,6 +43,23 @@ if %errorlevel%==0 (
     echo       OK — SentinelEdge will start automatically 30 seconds after every boot.
 ) else (
     echo       WARNING — Could not register startup task.
+    echo       Run this script as Administrator.
+)
+
+echo.
+echo [5/5] Registering nightly backup task (runs at 2:00 AM daily)...
+schtasks /delete /tn "SentinelEdgeBackup" /f 2>nul
+schtasks /create /tn "SentinelEdgeBackup" ^
+  /tr "python C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge\scripts\backup.py" ^
+  /sc daily ^
+  /st 02:00 ^
+  /ru SYSTEM ^
+  /rl HIGHEST ^
+  /f
+if %errorlevel%==0 (
+    echo       OK — Nightly backup scheduled at 2:00 AM daily.
+) else (
+    echo       WARNING — Could not register backup task.
     echo       Run this script as Administrator.
 )
 
