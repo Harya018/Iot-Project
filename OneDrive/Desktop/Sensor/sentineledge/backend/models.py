@@ -5,6 +5,13 @@ All input models include field_validator declarations that:
 - Strip whitespace from string fields.
 - Enforce business constraints with clear error messages.
 - Return HTTP 422 automatically on failure (Pydantic handles it).
+
+Security hardening (Change 2):
+- PIN fields: min_length=4, max_length=20, alphanumeric-only pattern
+- String fields: max_length enforced, min_length=1 for required fields
+- Numeric fields: ge/le bounds matching real-world valid ranges
+- Email fields: use EmailStr (pydantic[email]) everywhere
+- PIN/password fields never returned in any Out model
 """
 
 from __future__ import annotations
@@ -54,40 +61,52 @@ class AlertOut(BaseModel):
 # ── Input models with validation ──────────────────────────────────────────────
 
 class SubscriberIn(BaseModel):
-    name: str
-    phone: str
-    email: EmailStr
-    escalation_order: int = Field(ge=1, le=9999)
-    pin: Optional[str] = None  # if provided: 4-6 digits, stored as SHA-256 hash
+    name: str = Field(min_length=1, max_length=50)
+    phone: str = Field(min_length=1, max_length=20)
+    email: EmailStr = Field(max_length=254)
+    escalation_order: int = Field(ge=1, le=100)
+    pin: Optional[str] = None  # if provided: 4-20 alphanumeric chars, stored as bcrypt hash
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
-        v = v.strip()
         if len(v) < 2:
             raise ValueError("name must be at least 2 characters")
-        if len(v) > 50:
-            raise ValueError("name must be at most 50 characters")
         return v
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def strip_phone(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("phone")
     @classmethod
     def validate_phone(cls, v: str) -> str:
-        v = v.strip()
         if not re.match(r"^\+?[0-9]{10,15}$", v):
             raise ValueError(
                 "phone must be 10-15 digits, optionally prefixed with +"
             )
         return v
 
+    @field_validator("pin", mode="before")
+    @classmethod
+    def strip_pin(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if isinstance(v, str) else v
+
     @field_validator("pin")
     @classmethod
     def validate_pin(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        v = v.strip()
-        if not re.match(r"^[0-9]{4,6}$", v):
-            raise ValueError("pin must be 4-6 digits (numbers only)")
+        if len(v) < 4 or len(v) > 20:
+            raise ValueError("pin must be 4-20 characters")
+        if not re.match(r"^[a-zA-Z0-9]+$", v):
+            raise ValueError("pin must be alphanumeric only (letters and digits)")
         return v
 
 
@@ -100,28 +119,29 @@ class SubscriberOut(BaseModel):
     active: bool
     has_pin: bool
     created_at: str
+    # NOTE: 'pin' field intentionally excluded — never returned to clients
 
 
 class PushSubscriptionIn(BaseModel):
-    subscription_json: str
+    subscription_json: str = Field(min_length=1, max_length=5000)
 
 
 class ThresholdConfigIn(BaseModel):
-    temp_high: float
-    temp_low: float
+    temp_high: float = Field(ge=-50.0, le=200.0)
+    temp_low: float = Field(ge=-50.0, le=200.0)
 
     @field_validator("temp_high")
     @classmethod
     def validate_temp_high(cls, v: float) -> float:
-        if not (-50.0 <= v <= 150.0):
-            raise ValueError("temp_high must be between -50 and 150")
+        if not (-50.0 <= v <= 200.0):
+            raise ValueError("temp_high must be between -50 and 200")
         return v
 
     @field_validator("temp_low")
     @classmethod
     def validate_temp_low(cls, v: float) -> float:
-        if not (-50.0 <= v <= 150.0):
-            raise ValueError("temp_low must be between -50 and 150")
+        if not (-50.0 <= v <= 200.0):
+            raise ValueError("temp_low must be between -50 and 200")
         return v
 
     @model_validator(mode="after")
@@ -147,18 +167,20 @@ class ThresholdConfigDetailOut(BaseModel):
 
 
 class AcknowledgeIn(BaseModel):
-    acknowledged_by: str
+    acknowledged_by: str = Field(min_length=1, max_length=50)
+
+    @field_validator("acknowledged_by", mode="before")
+    @classmethod
+    def strip_acknowledged_by(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("acknowledged_by")
     @classmethod
     def validate_acknowledged_by(cls, v: str) -> str:
-        v = v.strip()
         if len(v) < 2:
             raise ValueError(
                 "acknowledged_by must be at least 2 characters and cannot be empty"
             )
-        if len(v) > 50:
-            raise ValueError("acknowledged_by must be at most 50 characters")
         return v
 
 
@@ -188,23 +210,31 @@ class ConfigChangeOut(BaseModel):
 
 class LoginIn(BaseModel):
     """Mobile app login request: name + numeric PIN."""
-    name: str
-    pin: str
+    name: str = Field(min_length=1, max_length=50)
+    pin: str = Field(min_length=4, max_length=20)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
-        v = v.strip()
         if len(v) < 2:
             raise ValueError("name must be at least 2 characters")
         return v
 
+    @field_validator("pin", mode="before")
+    @classmethod
+    def strip_pin(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
+
     @field_validator("pin")
     @classmethod
     def validate_pin(cls, v: str) -> str:
-        v = v.strip()
-        if not re.match(r"^[0-9]{4,6}$", v):
-            raise ValueError("pin must be 4-6 digits (numbers only)")
+        if not re.match(r"^[a-zA-Z0-9]+$", v):
+            raise ValueError("pin must be alphanumeric only (letters and digits)")
         return v
 
 
@@ -215,17 +245,22 @@ class LoginOut(BaseModel):
     name: str
     escalation_order: int
     message: str = "Login successful"
+    # NOTE: pin intentionally excluded from all Out models
 
 
 class SetPinIn(BaseModel):
     """Admin request to set or update a subscriber's PIN."""
     subscriber_id: int
-    pin: str
+    pin: str = Field(min_length=4, max_length=20)
+
+    @field_validator("pin", mode="before")
+    @classmethod
+    def strip_pin(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator("pin")
     @classmethod
     def validate_pin(cls, v: str) -> str:
-        v = v.strip()
-        if not re.match(r"^[0-9]{4,6}$", v):
-            raise ValueError("pin must be 4-6 digits (numbers only)")
+        if not re.match(r"^[a-zA-Z0-9]+$", v):
+            raise ValueError("pin must be alphanumeric only (letters and digits)")
         return v

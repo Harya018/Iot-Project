@@ -1,49 +1,42 @@
 @echo off
 title SentinelEdge Watchdog
-color 0A
+echo ============================================
+echo  SentinelEdge Watchdog Starting...
+echo ============================================
 
-echo.
-echo ==========================================
-echo   SentinelEdge -- Starting with Watchdog
-echo ==========================================
-echo.
-echo The watchdog will:
-echo   - Start the SentinelEdge server automatically
-echo   - Monitor it every 30 seconds (HTTPS health check)
-echo   - Restart it automatically if it crashes
-echo   - Email you if something goes wrong
-echo   - Stop after 5 consecutive failed restarts
-echo.
-echo Log file: logs\watchdog.log
-echo.
-echo Press Ctrl+C to stop the watchdog.
-echo The watchdog will ask if you also want to stop the server.
-echo.
-
-cd /d C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge
-
-:: Check Python is available
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERROR] Python not found in PATH.
-    echo         Make sure your virtual environment is activated.
-    pause
-    exit /b 1
+:: Step 1 — Ensure PostgreSQL is running before starting backend
+echo [1/3] Checking PostgreSQL...
+net start postgresql-x64-16 2>nul
+if %errorlevel%==0 (
+    echo       PostgreSQL started.
+) else (
+    echo       PostgreSQL already running.
 )
 
-:: Kill anything already on 5000 so the watchdog gets a clean slate
-echo [*] Checking port 5000...
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":5000 " ^| findstr "LISTENING"') do (
-    echo [*] Freeing port 5000 (PID %%a)...
-    taskkill /PID %%a /F >nul 2>&1
-)
+:: Wait 3 seconds for PostgreSQL to be fully ready
+timeout /t 3 /nobreak >nul
 
-echo [*] Starting watchdog...
+:: Step 2 — Kill anything on port 5000 (stale process from previous crash)
+echo [2/3] Clearing port 5000...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5000 "') do (
+    taskkill /PID %%a /F 2>nul
+)
+timeout /t 1 /nobreak >nul
+
+:: Step 3 — Start SentinelEdge with crash recovery loop
+echo [3/3] Starting SentinelEdge server with watchdog...
+echo       Server will auto-restart on crash.
+echo       Close this window to stop the server.
 echo.
 
+:loop
+echo [%date% %time%] Starting SentinelEdge...
 set PYTHONPATH=C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge\backend
-python watchdog.py
+cd /d C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge
+call venv\Scripts\uvicorn backend.main:app --host 0.0.0.0 --port 5000
 
 echo.
-echo [Watchdog] Exited.
-pause
+echo [%date% %time%] Server stopped or crashed. Restarting in 5 seconds...
+echo       (Close this window to stop restart loop)
+timeout /t 5 /nobreak >nul
+goto loop

@@ -53,6 +53,7 @@ from utils.time import now_iso
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from fastapi.responses import JSONResponse as _JSONResponse
 
 from middleware.cors import configure_cors
@@ -192,8 +193,9 @@ Admin endpoints require header:
 configure_cors(app)
 app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
 
-# ── Rate limiting (slowapi) ───────────────────────────────────────────────────
+# ── Rate limiting (slowapi) ───────────────────────────────────────────────────────
 app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)  # required for @limiter.limit() to work
 
 
 async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -372,7 +374,8 @@ _readings_router = APIRouter(prefix="/api", tags=["Readings"])
     summary="Get recent readings",
     description="Returns the last 60 sensor readings in reverse-chronological order.",
 )
-async def get_recent_readings():
+@limiter.limit("60/minute")
+async def get_recent_readings(request: Request):
     rows = database.get_recent_readings(limit=60)
     return [
         ReadingOut(

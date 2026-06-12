@@ -22,7 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 import database
 from models import LoginIn, LoginOut
@@ -129,8 +129,13 @@ async def me(x_auth_token: str = Header(default=None)):
 # Session TTL: 8 hours.
 
 class _AdminLoginIn(BaseModel):
-    name: str
-    password: str
+    name: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name", "password", mode="before")
+    @classmethod
+    def strip_fields(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 @router.post(
@@ -139,10 +144,12 @@ class _AdminLoginIn(BaseModel):
     description=(
         "Authenticate a dashboard user (main admin or sub-admin) with "
         "name + password. Returns role so the client can route to the "
-        "correct dashboard. Session TTL: 8 hours. Session persists across restarts."
+        "correct dashboard. Session TTL: 8 hours. Session persists across restarts. "
+        "Rate limited: 10/minute per IP."
     ),
 )
-async def admin_login(body: _AdminLoginIn):
+@limiter.limit("10/minute")
+async def admin_login(body: _AdminLoginIn, request: Request):
     """Login for the admin dashboard (main or sub-admin)."""
     admin = database.verify_admin_password(body.name, body.password)
     if admin is None:

@@ -346,9 +346,70 @@ def init_db() -> None:
             pool.putconn(conn)
 
         _run_migrations(pool)
+        migrate_pins_to_bcrypt()  # idempotent: skips already-bcrypt rows
         logger.info("Database initialised (PostgreSQL).")
         MODULE_STATUS["database"] = "ok"
     except Exception as exc:
         logger.exception("Failed to initialise database: %s", exc)
         MODULE_STATUS["database"] = f"error: {exc}"
         raise
+
+
+def migrate_pins_to_bcrypt() -> None:
+    """
+    One-time migration: upgrade any SHA-256 (or plain-text) stored credentials
+    to bcrypt.  Idempotent — bcrypt hashes start with '$2b$' so already-migrated
+    rows are skipped automatically.
+
+    Covers:
+      - admins.password_hash  (sub-admin accounts)
+      - subscribers.pin       (subscriber mobile-app PINs)
+
+    Called at the end of init_db() on every startup; safe to call multiple times.
+    """
+    # Late import to avoid circular import at module load time
+    from utils.security import hash_pin, verify_pin  # noqa: F401
+
+    pool = get_db_pool()
+
+    # ── Admins ────────────────────────────────────────────────────────────────
+    try:
+        rows = execute_read(
+            "SELECT id, password_hash FROM admins"
+        )
+        migrated_admins = 0
+        for row in rows:
+            ph = row.get("password_hash", "")
+            if ph and not ph.startswith("$2b$"):
+                # Hash the currently stored value (plain or sha256 hex)
+                new_hash = hash_pin(ph)
+                execute_write(
+                    "UPDATE admins SET password_hash = %s WHERE id = %s",
+                    (new_hash, row["id"]),
+                )
+                migrated_admins += 1
+        if migrated_admins:
+            logger.info("Migrated %d admin password(s) to bcrypt", migrated_admins)
+    except Exception as exc:
+        logger.warning("migrate_pins_to_bcrypt (admins) failed: %s", exc)
+
+    # ── Subscribers ──────────────────────────────────────────────────────────
+    try:
+        rows = execute_read(
+            "SELECT id, pin FROM subscribers WHERE pin IS NOT NULL"
+        )
+        migrated_subs = 0
+        for row in rows:
+            stored = row.get("pin", "")
+            if stored and not stored.startswith("$2b$"):
+                new_hash = hash_pin(stored)
+                execute_write(
+                    "UPDATE subscribers SET pin = %s WHERE id = %s",
+                    (new_hash, row["id"]),
+                )
+                migrated_subs += 1
+        if migrated_subs:
+            logger.info("Migrated %d subscriber PIN(s) to bcrypt", migrated_subs)
+    except Exception as exc:
+        logger.warning("migrate_pins_to_bcrypt (subscribers) failed: %s", exc)
+

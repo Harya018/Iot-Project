@@ -3,9 +3,10 @@ database/queries/subscribers.py — Subscriber CRUD queries.
 
 PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
 Removed sqlite3 import (no longer needed; psycopg2.errors used instead).
+
+Security upgrade: subscriber PINs now stored as bcrypt hashes (see utils/security.py).
 """
 
-import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -13,13 +14,9 @@ import psycopg2.errors
 
 from database.connection import execute_write, execute_read
 from utils.logger import get_logger
+from utils.security import hash_pin as _hash_pin_bcrypt, verify_pin as _verify_pin
 
 logger = get_logger(__name__)
-
-
-def _hash_pin(pin: str) -> str:
-    """Return the SHA-256 hex digest of a PIN string."""
-    return hashlib.sha256(pin.encode()).hexdigest()
 
 
 def get_subscribers_ordered() -> list:
@@ -62,22 +59,27 @@ def get_subscriber_by_id(subscriber_id: int) -> Optional[dict]:
 def get_subscriber_by_name_and_pin(name: str, pin: str) -> Optional[dict]:
     """
     Find an active subscriber whose name matches (case-insensitive) and whose
-    stored PIN hash matches the SHA-256 hash of the supplied PIN.
+    stored bcrypt PIN hash matches the supplied plain-text PIN.
 
+    Fetches by name first, then uses bcrypt comparison (timing-safe).
     Returns the subscriber dict on success, or None if not found / bad PIN.
     """
     try:
-        hashed = _hash_pin(pin)
         rows = execute_read(
             """
             SELECT * FROM subscribers
             WHERE LOWER(name) = LOWER(%s)
-              AND pin = %s
               AND active = 1
             """,
-            (name, hashed),
+            (name,),
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        subscriber = rows[0]
+        stored_pin = subscriber.get("pin")
+        if not stored_pin or not _verify_pin(pin, stored_pin):
+            return None
+        return subscriber
     except Exception as exc:
         logger.error("get_subscriber_by_name_and_pin failed: %s", exc)
         return None
@@ -89,12 +91,12 @@ def add_subscriber(
 ) -> int:
     """Insert a new subscriber and return its row id.
 
-    If *pin* is provided it is stored as a SHA-256 hash.
+    If *pin* is provided it is stored as a bcrypt hash.
     Returns -1 on duplicate escalation_order or any other error.
     """
     try:
         ts = datetime.now(timezone.utc).isoformat()
-        hashed_pin = _hash_pin(pin) if pin else None
+        hashed_pin = _hash_pin_bcrypt(pin) if pin else None
         cur = execute_write(
             """
             INSERT INTO subscribers
@@ -114,9 +116,9 @@ def add_subscriber(
 
 
 def set_subscriber_pin(subscriber_id: int, pin: str) -> bool:
-    """Hash and store a PIN for an existing subscriber. Returns True on success."""
+    """Bcrypt-hash and store a PIN for an existing subscriber. Returns True on success."""
     try:
-        hashed = _hash_pin(pin)
+        hashed = _hash_pin_bcrypt(pin)
         execute_write(
             "UPDATE subscribers SET pin = %s WHERE id = %s",
             (hashed, subscriber_id),

@@ -104,7 +104,9 @@ _PERIOD_LABELS = {
     ),
     dependencies=[Depends(require_admin)],
 )
+@limiter.limit("20/minute")
 async def delete_alerts(
+    request: Request,
     period: str = Query(
         ...,
         description="Time period to delete: 1h | 24h | 7d | 30d | all",

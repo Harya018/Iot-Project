@@ -51,10 +51,10 @@ async def get_subscribers(request: Request):
     response_model=SubscriberOut,
     status_code=201,
     summary="Add a subscriber",
-    description="Creates a new alert subscriber. Requires admin auth. Rate limited to 10/min.",
+    description="Creates a new alert subscriber. Requires admin auth. Rate limited to 30/min.",
     dependencies=[Depends(require_admin)],
 )
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def add_subscriber(body: SubscriberIn, request: Request):
     sub_id = database.add_subscriber(
         body.name, body.phone, body.email, body.escalation_order,
@@ -75,7 +75,8 @@ async def add_subscriber(body: SubscriberIn, request: Request):
     description="Permanently removes a subscriber by ID. Requires admin auth.",
     dependencies=[Depends(require_admin)],
 )
-async def delete_subscriber(subscriber_id: int):
+@limiter.limit("30/minute")
+async def delete_subscriber(subscriber_id: int, request: Request):
     ok = database.delete_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
@@ -88,7 +89,8 @@ async def delete_subscriber(subscriber_id: int):
     description="Temporarily disables a subscriber (is_active=0). They will not receive alerts. Requires admin auth.",
     dependencies=[Depends(require_admin)],
 )
-async def disable_subscriber(subscriber_id: int):
+@limiter.limit("30/minute")
+async def disable_subscriber(subscriber_id: int, request: Request):
     ok = database.disable_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
@@ -101,7 +103,8 @@ async def disable_subscriber(subscriber_id: int):
     description="Re-enables a disabled subscriber (is_active=1). They will resume receiving alerts. Requires admin auth.",
     dependencies=[Depends(require_admin)],
 )
-async def enable_subscriber(subscriber_id: int):
+@limiter.limit("30/minute")
+async def enable_subscriber(subscriber_id: int, request: Request):
     ok = database.enable_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")

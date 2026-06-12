@@ -166,7 +166,11 @@ def delete_alerts_by_period(period: str) -> int:
                     logger.warning("delete_alerts_by_period: unknown period %s", period)
                     return 0
 
-                # Get IDs first so we can cascade manually (no FK cascade)
+                # SECURITY: cutoff_expr is sourced from the hardcoded PERIOD_MAP dict above,
+                # never from raw user input. The 'period' key is validated by the router
+                # (only "1h" / "24h" / "7d" / "30d" are accepted) before reaching this
+                # function, so this f-string carries no SQL injection risk.
+                # If this logic ever changes, convert to a parameterized query immediately.
                 cur.execute(
                     f"SELECT id FROM alerts WHERE timestamp::TIMESTAMPTZ < {cutoff_expr}"
                 )

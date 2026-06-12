@@ -13,7 +13,7 @@ Changes in this version:
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 import database
@@ -58,7 +58,12 @@ async def get_ack_log(limit: int = 100):
 
 
 class _VerifyIn(BaseModel):
-    password: str
+    password: str = Field(min_length=1, max_length=200)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def strip_password(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 @router.post(
@@ -75,9 +80,19 @@ async def verify_password(body: _VerifyIn):
 # ─── Admin Profile (GET + PATCH username/PIN) ─────────────────────────────────
 
 class _ProfileUpdateIn(BaseModel):
-    current_pin: str
-    new_username: Optional[str] = None
-    new_pin:      Optional[str] = None
+    current_pin: str = Field(min_length=1, max_length=200)
+    new_username: Optional[str] = Field(default=None, max_length=50)
+    new_pin:      Optional[str] = Field(default=None, min_length=4, max_length=20)
+
+    @field_validator("current_pin", "new_pin", mode="before")
+    @classmethod
+    def strip_pin_fields(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("new_username", mode="before")
+    @classmethod
+    def strip_new_username(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if isinstance(v, str) else v
 
 
 @router.get(
@@ -99,7 +114,8 @@ async def get_admin_profile():
     description="Update username/PIN for the main admin. current_pin must match. On success all sessions invalidated.",
     dependencies=[Depends(require_admin)],
 )
-async def update_admin_profile(body: _ProfileUpdateIn):
+@limiter.limit("10/minute")
+async def update_admin_profile(body: _ProfileUpdateIn, request: Request):
     """Change admin username and/or PIN. Invalidates all DB sessions on success."""
     import re as _re
     import os as _os
@@ -169,8 +185,13 @@ async def update_admin_profile(body: _ProfileUpdateIn):
 # ─── Username + PIN Login (DB-backed sessions) ────────────────────────────────
 
 class _AdminLoginIn(BaseModel):
-    username: str
-    pin: str
+    username: str = Field(min_length=1, max_length=50)
+    pin: str = Field(min_length=4, max_length=20)
+
+    @field_validator("username", "pin", mode="before")
+    @classmethod
+    def strip_fields(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 @router.post(
@@ -217,8 +238,13 @@ async def admin_login(body: _AdminLoginIn, request: Request):
 # ─── Change Admin Password ────────────────────────────────────────────────────
 
 class _ChangePasswordIn(BaseModel):
-    current_password: str
-    new_password: str
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=6, max_length=200)
+
+    @field_validator("current_password", "new_password", mode="before")
+    @classmethod
+    def strip_passwords(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 @router.post(
@@ -303,12 +329,22 @@ async def change_admin_password(body: _ChangePasswordIn):
 # ─── Sub-Admin Management ─────────────────────────────────────────────────────
 
 class _CreateAdminIn(BaseModel):
-    name: str
-    password: str
+    name: str = Field(min_length=2, max_length=50)
+    password: str = Field(min_length=6, max_length=200)
+
+    @field_validator("name", "password", mode="before")
+    @classmethod
+    def strip_fields(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 class _UpdateAdminPwdIn(BaseModel):
-    new_password: str
+    new_password: str = Field(min_length=6, max_length=200)
+
+    @field_validator("new_password", mode="before")
+    @classmethod
+    def strip_new_password(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 @router.get(
